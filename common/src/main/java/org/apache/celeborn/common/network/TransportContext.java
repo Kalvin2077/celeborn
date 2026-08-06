@@ -188,10 +188,12 @@ public class TransportContext implements Closeable {
       BaseMessageHandler resolvedMsgHandler,
       boolean isClient) {
     try {
+      // k 首先取得 netty 原生 pipeline
       ChannelPipeline pipeline = channel.pipeline();
       if (nettyLogger.getLoggingHandler() != null) {
         pipeline.addLast("loggingHandler", nettyLogger.getLoggingHandler());
       }
+      // ? 何时开
       if (sslEncryptionEnabled()) {
         if (!isClient && !sslFactory.hasKeyManagers()) {
           throw new IllegalStateException("Not a client connection and no keys configured");
@@ -210,10 +212,12 @@ public class TransportContext implements Closeable {
         pipeline.addLast("chunkedWriter", new ChunkedWriteHandler());
       }
 
+      // ? 何时会加 limiter
       if (channelsLimiter != null) {
         pipeline.addLast("limiter", channelsLimiter);
       }
       TransportChannelHandler channelHandler = createChannelHandler(channel, resolvedMsgHandler);
+      // ? 了解具体的 handler
       pipeline
           .addLast("encoder", sslEncryptionEnabled() ? SSL_ENCODER : ENCODER)
           .addLast(FrameDecoder.HANDLER_NAME, decoder)
@@ -232,10 +236,22 @@ public class TransportContext implements Closeable {
 
   private TransportChannelHandler createChannelHandler(
       Channel channel, BaseMessageHandler msgHandler) {
+    // k responseHandler: 负责追踪“已经发出、尚未收到响应”的请求。
+    // k 连接异常关闭时，它还要把所有未完成请求回调为失败，避免调用方永久等待。
+    // k 还需要负责 callback
     TransportResponseHandler responseHandler = new TransportResponseHandler(conf, channel);
+
+    // k client: 包装 Netty 操作，client.sentRpc/fetchChunk/pushData
+    // k client 包装 resphandler: 发送请求是需要记录 callback
     TransportClient client = new TransportClient(channel, responseHandler);
+
+    // k requestHandler: 全双工结构下，peer 任意一端都可以发送请求，所以客户端也需要
+    // k 负责处理对端发来的请求，rpcRequest，OneWayMessage，ChunkFetchRequest，其他 RequestMessage
+    // k 收到对端请求时需要，一个 Client 去回复，Client 有封装的 api，方便使用。
     TransportRequestHandler requestHandler =
         new TransportRequestHandler(channel, client, msgHandler);
+
+    // k pipeline 最靠近出入站的点，处理消息。
     return new TransportChannelHandler(
         client,
         responseHandler,

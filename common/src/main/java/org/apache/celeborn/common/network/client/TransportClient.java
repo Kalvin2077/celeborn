@@ -92,6 +92,7 @@ public class TransportClient implements Closeable {
   }
 
   public boolean isActive() {
+    // ? isOpen() 和 isActive() 代表 channel 可用吗？
     return !timedOut && (channel.isOpen() || channel.isActive());
   }
 
