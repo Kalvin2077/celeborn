@@ -44,6 +44,7 @@ class MasterSource(conf: CelebornConf) extends AbstractSource(conf, Role.MASTER)
 object MasterSource {
   val STATUS_CODE_LABEL = "statusCode"
 
+  // k 已注册，未丢失的 worker
   val WORKER_COUNT = "WorkerCount"
 
   val LOST_WORKER_COUNT = "LostWorkerCount"
@@ -52,6 +53,7 @@ object MasterSource {
 
   val SHUTDOWN_WORKER_COUNT = "ShutdownWorkerCount"
 
+  // k 允许分配新 slot 的 worker。
   val AVAILABLE_WORKER_COUNT = "AvailableWorkerCount"
 
   val DECOMMISSION_WORKER_COUNT = "DecommissionWorkerCount"

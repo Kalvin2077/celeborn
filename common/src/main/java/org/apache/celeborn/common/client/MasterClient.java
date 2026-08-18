@@ -63,12 +63,16 @@ public class MasterClient {
     this.rpcEnv = rpcEnv;
     this.conf = conf;
     this.isWorker = isWorker;
+    // k Master 地址解析器。默认创建 StaticMasterEndpointResolver，从配置中解析 Master 地址列表
+    // k 解析后类似 master-1:9097 master-2:9097 master-3:9097
     this.masterEndpointResolver =
         Utils.instantiateMasterEndpointResolver(this.conf.masterEndpointResolver(), conf, isWorker);
 
     this.maxRetries = conf.masterClientMaxRetries();
     this.rpcTimeout = conf.masterClientRpcAskTimeout();
+    // k 空的 Endpoint 引用，所以目前只是解析地址，而没有真正创建连接
     this.rpcEndpointRef = new AtomicReference<>();
+    // k 创建一个线程，用于发送单向消息
     this.oneWayMessageSender =
         ThreadUtils.newDaemonSingleThreadExecutor("celeborn-one-way-message-sender");
   }
@@ -288,8 +292,10 @@ public class MasterClient {
    * @return non-empty RpcEndpointRef.
    */
   private RpcEndpointRef getOrSetupRpcEndpointRef(AtomicInteger currentIndex) {
+    // k lazy 创建
     RpcEndpointRef endpointRef = rpcEndpointRef.get();
 
+    // k Master 可能在换，这里拿活跃 Master 的 EP
     List<String> activeMasterEndpoints = masterEndpointResolver.getActiveMasterEndpoints();
     maxRetries = Math.max(maxRetries, activeMasterEndpoints.size());
     // If endpoints are updated by MasterEndpointResolver, we should reset the currentIndex to 0.
@@ -331,6 +337,8 @@ public class MasterClient {
   private RpcEndpointRef setupEndpointRef(String endpoint) {
     RpcEndpointRef endpointRef = null;
     try {
+      // k endpoint: master-1:9097, epname: MasterEndpoint
+      // k ep 是实际端口，name 用于隔离
       endpointRef =
           rpcEnv.setupEndpointRef(
               RpcAddress.fromHostAndPort(endpoint), masterEndpointResolver.masterEndpointName());

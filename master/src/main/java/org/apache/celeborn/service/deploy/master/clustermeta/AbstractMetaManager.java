@@ -71,7 +71,11 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
   public final Map<String, Set<Integer>> registeredAppAndShuffles =
       JavaUtils.newConcurrentHashMap();
   public final Set<String> hostnameSet = ConcurrentHashMap.newKeySet();
+  // k Map[worker's id -> worker] 注册表，在 Lost 检测中删除。
+  // k 所以 worker 关机，但 Master 未走完 Lost 检测时，可能仍然在册
   public final Map<String, WorkerInfo> workersMap = JavaUtils.newConcurrentHashMap();
+  // k Set{可用于分配 slot 的 worker}
+  // k 真正分配 Slot 时，Master 使用的也是 availableWorkers，而不是注册表
   public final Set<WorkerInfo> availableWorkers = ConcurrentHashMap.newKeySet();
 
   public final ConcurrentHashMap<WorkerInfo, Long> lostWorkers = JavaUtils.newConcurrentHashMap();
@@ -377,6 +381,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
       workerInfo.networkLocation_$eq(rackResolver.resolve(host).getNetworkLocation());
     }
     workerInfo.updateDiskSlots(estimatedPartitionSize);
+    // k 注册 worker 到 master
     synchronized (workersMap) {
       workersMap.putIfAbsent(workerInfo.toUniqueId(), workerInfo);
       shutdownWorkers.remove(workerInfo);

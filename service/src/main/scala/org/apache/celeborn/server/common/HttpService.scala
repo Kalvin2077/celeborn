@@ -34,6 +34,8 @@ import org.apache.celeborn.server.common.http.api.ApiRootResource
 import org.apache.celeborn.server.common.http.authentication.{AuthenticationFilter, HttpAuthenticationFactory}
 import org.apache.celeborn.server.common.service.config.ConfigLevel
 
+// k Master/Worker 都是 Http 服务。
+// k Master/Worker 的内部能力通过 HTTP API、Swagger 和指标端点暴露出来，并统一管理 HTTP Server 的启停
 abstract class HttpService extends Service with Logging {
   type HandleResponse = (Boolean, String)
 
@@ -154,10 +156,12 @@ abstract class HttpService extends Service with Logging {
     sb.toString()
   }
 
+  // k 有些能力写成抽象方法，Master，Worker 都得实现
   def getShuffleList: String
 
   def getApplicationList: String
 
+  // k 有些能力只属于 Master，Worker 继承默认抛出异常
   def getMasterGroupInfo: String = throw new UnsupportedOperationException()
 
   def getLostWorkers: String = throw new UnsupportedOperationException()
@@ -219,6 +223,7 @@ abstract class HttpService extends Service with Logging {
     }
   }
 
+  // k 配置根据 serviceName 读取不同配置
   private def httpHost(): String = {
     if (conf.bindWildcardAddress) {
       TransportModuleConstants.WILDCARD_BIND_ADDRESS

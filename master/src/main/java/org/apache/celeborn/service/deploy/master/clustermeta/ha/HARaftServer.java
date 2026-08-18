@@ -497,10 +497,13 @@ public class HARaftServer {
    * @return true if cached role is Leader, false otherwise.
    */
   private boolean checkCachedPeerRoleIsLeader() {
+    // k 可重入读写锁，多个线程可同时持有读锁，写锁同一时间只有一个线程持有
+    // k 写锁排斥所有锁
     this.roleCheckLock.readLock().lock();
     try {
       return cachedPeerRole.isPresent() && cachedPeerRole.get() == RaftProtos.RaftPeerRole.LEADER;
     } finally {
+      // k 用 try-finally 保证释放锁
       this.roleCheckLock.readLock().unlock();
     }
   }
