@@ -49,7 +49,9 @@ public class HAHelper {
       boolean bindPreferIp)
       throws IOException {
 
+    // k 只用 master leader 处理
     HARaftServer ratisServer = getRatisServer(masterStatusSystem);
+    // k null 意味没开 ratis
     if (ratisServer != null) {
       if (ratisServer.isLeader()) {
         return true;

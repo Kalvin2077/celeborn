@@ -321,6 +321,11 @@ object ThreadUtils {
    * In general, we should use this method because many places in Spark use [[ThreadLocal]] and it's
    * hard to debug when [[ThreadLocal]]s leak to other tasks.
    */
+  // k Awaitable 形容 “可以等待结果的异步对象”的 trait，结果类型为 T，必须提供等待结果的能力。
+  // k 比如 Future[T] 就具有这个 trait
+  // k +T 代表协变，可以返回 T 的基类的类，也可以视为 Awaitable
+  // k ready: 等待完成，不取结果。
+  // k result: 等待完成，取出结果。
   @throws(classOf[CelebornException])
   def awaitResult[T](awaitable: Awaitable[T], atMost: Duration): T = {
     try {
@@ -332,6 +337,8 @@ object ThreadUtils {
       // TimeoutException is thrown in the current thread, so not need to warp the exception.
       case NonFatal(t) if !t.isInstanceOf[TimeoutException] =>
         throw new CelebornException("Exception thrown in awaitResult: ", t)
+      // k 两类异常原样抛出，TimeoutException 需要识别补充相应配置和 rpc 地址。
+      // k JVM 严重错误比如 OOM 不会包装成普通业务异常
       case e: Throwable =>
         throw e
     }

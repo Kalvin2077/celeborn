@@ -241,6 +241,7 @@ private[celeborn] class Master(
   masterSource.addGauge(MasterSource.REGISTERED_SHUFFLE_COUNT) { () =>
     statusSystem.registeredShuffleCount
   }
+  // k
   masterSource.addGauge(MasterSource.WORKER_COUNT) { () => statusSystem.workersMap.size }
   masterSource.addGauge(MasterSource.LOST_WORKER_COUNT) { () => statusSystem.lostWorkers.size }
   masterSource.addGauge(MasterSource.EXCLUDED_WORKER_COUNT) { () =>
@@ -517,6 +518,15 @@ private[celeborn] class Master(
           metricLabels))
 
     case pbRegisterWorker: PbRegisterWorker =>
+      // k 一份可能的值
+      // k requestId       = "550e8400-e29b-41d4-a716-446655440000#12" uuid#callId
+      // k host            = "celeborn-worker-90.cn-beijing-i.celeborn.emr.aliyuncs.com"
+      // k rpcPort         = 8127
+      // k pushPort        = 8137
+      // k fetchPort       = 8147
+      // k replicatePort   = 8157
+      // k internalPort    = 8127
+      // k networkLocation = "/default-rack"
       val requestId = pbRegisterWorker.getRequestId
       val host = pbRegisterWorker.getHost
       val rpcPort = pbRegisterWorker.getRpcPort
@@ -525,6 +535,7 @@ private[celeborn] class Master(
       val replicatePort = pbRegisterWorker.getReplicatePort
       val internalPort = pbRegisterWorker.getInternalPort
       val networkLocation = pbRegisterWorker.getNetworkLocation
+      // k "/mnt/disk1" -> (mountPath, usableSpace, totalSpace, status)
       val disks = pbRegisterWorker.getDisksList.asScala
         .map { pbDiskInfo => pbDiskInfo.getMountPoint -> PbSerDeUtils.fromPbDiskInfo(pbDiskInfo) }
         .toMap.asJava

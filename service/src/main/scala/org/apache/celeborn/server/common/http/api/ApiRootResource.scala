@@ -23,13 +23,21 @@ import org.glassfish.jersey.servlet.ServletContainer
 
 import org.apache.celeborn.server.common.HttpService
 
+// k 把 Jersey REST API 封装成 Jetty 可挂载的 Handler。
+// k 也把 http service 放入 context 供 resource 调用。
 private[celeborn] object ApiRootResource {
   def getServletHandler(rs: HttpService): ServletContextHandler = {
     val openapiConf: ResourceConfig = new OpenAPIConfig(rs.serviceName)
+    // k 创建 Jersey Servlet 用于处理 REST API
     val holder = new ServletHolder(new ServletContainer(openapiConf))
+    // k 将 Servelet 放入 jetty Server，计划长期运行
+    // ? 为什么不使用 HTTP Session
+    // k http 默认无状态，sessions 用于增强状态能力，celeborn 不需要登陆会话
     val handler = new ServletContextHandler(ServletContextHandler.NO_SESSIONS)
     handler.setContextPath("/")
+    // k 将 service 与 servlet 绑定
     HttpServiceContext.set(handler, rs)
+    // k jetty Server 将所有 /* 请求交给 hodler 也就是 Jersey Servlet
     handler.addServlet(holder, "/*")
     handler
   }

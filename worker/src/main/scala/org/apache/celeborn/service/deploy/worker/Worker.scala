@@ -61,6 +61,7 @@ import org.apache.celeborn.service.deploy.worker.monitor.JVMQuake
 import org.apache.celeborn.service.deploy.worker.profiler.JVMProfiler
 import org.apache.celeborn.service.deploy.worker.storage.{PartitionFilesSorter, StorageManager}
 
+// k 构造函数
 private[celeborn] class Worker(
     override val conf: CelebornConf,
     val workerArgs: WorkerArguments)
@@ -68,8 +69,10 @@ private[celeborn] class Worker(
 
   @volatile private var stopped = false
 
+  // k Overrride 服务名
   override def serviceName: String = Service.WORKER
 
+  // k Override 观测系统，注册 Metric Source
   override val metricsSystem: MetricsSystem =
     MetricsSystem.createMetricsSystem(serviceName, conf)
   val workerSource = new WorkerSource(conf)
@@ -104,10 +107,14 @@ private[celeborn] class Worker(
     logInfo(getConf)
   }
 
+  // k RpcEnv 是 Celeborn 内部 RPC 通信环境，负责监听 RPC 端口、注册 Endpoint，以及向 Master 发送请求
   val rpcEnv: RpcEnv =
     if (!authEnabled) {
       RpcEnv.create(
+        // k "Worker" rpcEnv 实例的名字，标识当前 RPC 系统
+        // k "Worker"/"WorkerInternal"，rpcEnv 的隔离靠名字
         RpcNameConstants.WORKER_SYS,
+        // k "rpc_service" 网络配置模块名，用于选择配置，比如 celeborn.rpc_service.io.*
         TransportModuleConstants.RPC_SERVICE_MODULE,
         workerArgs.host,
         workerArgs.port,
@@ -155,6 +162,7 @@ private[celeborn] class Worker(
 
   private val host = rpcEnv.address.host
   private val rpcPort = rpcEnv.address.port
+  // k 可选的内部控制 rpc port
   private val internalPort = internalRpcEnvInUse.address.port
   Utils.checkHost(host)
 
@@ -306,12 +314,15 @@ private[celeborn] class Worker(
     }
   }
 
+  // k shuffle write port
   private val pushPort = pushServer.getPort
   assert(pushPort > 0, "worker push bind port should be positive")
 
+  // k shuffle read port
   private val fetchPort = fetchServer.getPort
   assert(fetchPort > 0, "worker fetch bind port should be positive")
 
+  // k shuffle write 时 多 replica 互传
   private val replicatePort = replicateServer.getPort
   assert(replicatePort > 0, "worker replica bind port should be positive")
 
@@ -323,6 +334,7 @@ private[celeborn] class Worker(
     .map { diskInfo => diskInfo.mountPoint -> diskInfo }
     .toMap.asJava
 
+  // k 记录一些 worker 关键信息用于组件间传递
   val workerInfo =
     new WorkerInfo(
       host,
@@ -1248,6 +1260,7 @@ private[celeborn] class Worker(
 
 private[deploy] object Worker extends Logging {
   def main(args: Array[String]): Unit = {
+    // k 注册 OS Signal 处理器，输出诊断
     SignalUtils.registerLogger(log)
     val conf = new CelebornConf
     val workerArgs = new WorkerArguments(args, conf)
@@ -1255,11 +1268,16 @@ private[deploy] object Worker extends Logging {
     // much as possible. Therefore, if the user manually specifies the address of the Master when
     // starting the Worker, we should set it in the parameters and automatically calculate what the
     // address of the Master should be used in the end.
+    // k master 是 Option，foreeach 可用于检查 Some
+    // k master 是来自 cmd 的参数，会用于覆盖配置
+
     workerArgs.master.foreach { master =>
+      // k 形似 celeborn://master.example.com:9097
       conf.set(MASTER_ENDPOINTS.key, RpcAddress.fromCelebornURL(master).hostPort)
     }
 
     try {
+      // k http 服务
       val worker = new Worker(conf, workerArgs)
       worker.initialize()
     } catch {

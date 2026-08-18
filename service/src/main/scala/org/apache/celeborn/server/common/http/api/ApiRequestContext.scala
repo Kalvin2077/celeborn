@@ -59,13 +59,19 @@ class RestExceptionMapper extends ExceptionMapper[Exception] with Logging {
   }
 }
 
+// k 包级可见，单例对象
+// k 把 rs 放进 Context 的一个普通属性表。需要用服务的时候从 Context 中取用
+// k httpservice 与 servlet 生命周期一致，按 web 应用隔离
 private[celeborn] object HttpServiceContext {
+  // k 类完整名用作 attribute：org.apache.celeborn.server.common.http.api.HttpServiceContext$
   private val attribute = getClass.getCanonicalName
 
+  // k http server 初始化时，将 attribute -> master/worker service 放入上下文
   def set(contextHandler: ContextHandler, rs: HttpService): Unit = {
     contextHandler.setAttribute(attribute, rs)
   }
 
+  // k 从 Servlet Context 取出该对象，并转换成 HttpService，找到对应实际例子
   def get(context: ServletContext): HttpService = {
     context.getAttribute(attribute).asInstanceOf[HttpService]
   }

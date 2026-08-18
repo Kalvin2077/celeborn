@@ -28,6 +28,7 @@ import org.apache.celeborn.common.util.{ThreadUtils, Utils}
 /**
  * An exception thrown if RpcTimeout modifies a `TimeoutException`.
  */
+// k 包装 TimeoutException， 增强额外信息
 private[celeborn] class RpcTimeoutException(message: String, cause: TimeoutException)
   extends TimeoutException(message) { initCause(cause) }
 
