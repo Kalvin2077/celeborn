@@ -37,13 +37,6 @@ import org.apache.celeborn.service.deploy.worker.WorkerSource
 import org.apache.celeborn.service.deploy.worker.memory.MemoryManager
 
 class TierWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
-  private class FailBeforeAddCompositeByteBuf(failure: Throwable)
-    extends CompositeByteBuf(UnpooledByteBufAllocator.DEFAULT, false, Int.MaxValue) {
-    override def addComponent(
-        increaseWriterIndex: Boolean,
-        buffer: ByteBuf): CompositeByteBuf = throw failure
-  }
-
   private class LargeReadableByteBuf(buffer: ByteBuf, virtualSize: Int)
     extends DuplicatedByteBuf(buffer) {
     override def capacity(): Int = virtualSize
@@ -391,83 +384,6 @@ class TierWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     val fileLen = localTierWriter.close()
     assert(fileLen == 10240)
     assert(localTierWriter.closed === true)
-  }
-
-  test("memory tier writer should not account data when insertion fails before adding") {
-    val memoryTierWriter = prepareMemoryWriter
-    val buf = WriterUtils.generateSparkFormatData(UnpooledByteBufAllocator.DEFAULT, 0)
-    val refCntBeforeWrite = buf.refCnt()
-    val memoryManager = MemoryManager.instance()
-    val memoryCounterBefore = memoryManager.getMemoryFileStorageCounter
-    val diskCounterBefore = memoryManager.getDiskBufferCounter.get()
-    val fileLengthBefore = memoryTierWriter.fileInfo.getFileLength
-    val failure = new OutOfMemoryError("insertion failed before adding component")
-    val failingBuffer = new FailBeforeAddCompositeByteBuf(failure)
-    val originalFlushBuffer = memoryTierWriter.flushBuffer
-    memoryTierWriter.flushBuffer = failingBuffer
-    originalFlushBuffer.release()
-    var callerReferenceReleased = false
-
-    try {
-      memoryTierWriter.numPendingWrites.incrementAndGet()
-      val thrown = intercept[OutOfMemoryError](memoryTierWriter.write(buf))
-
-      assert(thrown eq failure)
-      assert(failingBuffer.writerIndex() === 0)
-      assert(failingBuffer.numComponents() === 0)
-      assert(memoryManager.getMemoryFileStorageCounter === memoryCounterBefore)
-      assert(memoryTierWriter.fileInfo.getFileLength === fileLengthBefore)
-      assert(buf.refCnt() === refCntBeforeWrite)
-      assert(buf.release())
-      callerReferenceReleased = true
-      assert(buf.refCnt() === 0)
-    } finally {
-      memoryTierWriter.destroy(new IOException("test cleanup"))
-      restoreCounters(memoryCounterBefore, diskCounterBefore)
-      if (!callerReferenceReleased && buf.refCnt() > 0) {
-        buf.release(buf.refCnt())
-      }
-    }
-  }
-
-  test("local tier writer should not account data when insertion fails before adding") {
-    val localTierWriter = prepareLocalTierWriter(false)
-    val buf = WriterUtils.generateSparkFormatData(UnpooledByteBufAllocator.DEFAULT, 0)
-    val refCntBeforeWrite = buf.refCnt()
-    val memoryManager = MemoryManager.instance()
-    val memoryCounterBefore = memoryManager.getMemoryFileStorageCounter
-    val diskCounterBefore = memoryManager.getDiskBufferCounter.get()
-    val failure = new OutOfMemoryError("insertion failed before adding component")
-    val failingBuffer = new FailBeforeAddCompositeByteBuf(failure)
-    val originalFlushBuffer = localTierWriter.flushBuffer
-    localTierWriter.flushBuffer = failingBuffer
-    localTierWriter.getFlusher.returnBuffer(originalFlushBuffer, false)
-    var callerReferenceReleased = false
-
-    try {
-      localTierWriter.numPendingWrites.incrementAndGet()
-      val thrown = intercept[OutOfMemoryError](localTierWriter.write(buf))
-
-      assert(thrown eq failure)
-      assert(failingBuffer.writerIndex() === 0)
-      assert(failingBuffer.numComponents() === 0)
-      assert(memoryManager.getDiskBufferCounter.get() === diskCounterBefore)
-      assert(buf.refCnt() === refCntBeforeWrite)
-      assert(buf.release())
-      callerReferenceReleased = true
-      assert(buf.refCnt() === 0)
-    } finally {
-      if (localTierWriter.flushBuffer != null) {
-        localTierWriter.flushBuffer.release()
-        localTierWriter.flushBuffer = null
-      }
-      localTierWriter.numPendingWrites.set(0)
-      localTierWriter.close()
-      restoreCounters(memoryCounterBefore, diskCounterBefore)
-      if (!callerReferenceReleased && buf.refCnt() > 0) {
-        buf.release(buf.refCnt())
-      }
-    }
   }
 
   test("memory tier writer should preserve state on composite buffer capacity overflow") {

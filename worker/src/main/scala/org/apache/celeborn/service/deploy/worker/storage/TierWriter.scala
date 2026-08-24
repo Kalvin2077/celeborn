@@ -92,7 +92,6 @@ abstract class TierWriterBase(
 
   protected def appendToFlushBuffer(buf: ByteBuf): Unit = {
     val numBytes = buf.readableBytes()
-    val refCntBeforeRetain = buf.refCnt()
     val writerIndexBefore = flushBuffer.writerIndex()
     val numComponentsBefore = flushBuffer.numComponents()
     buf.retain()
@@ -106,8 +105,6 @@ abstract class TierWriterBase(
             flushBuffer.numComponents() != numComponentsBefore
         if (componentAdded) {
           accountAddedBytes(numBytes)
-        } else if (buf.refCnt() > refCntBeforeRetain) {
-          buf.release()
         }
         logError(
           s"Failed to add $numBytes bytes to flush buffer for shuffle $shuffleKey file $filename.",
