@@ -82,15 +82,15 @@ class TierWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     val memoryManager = MemoryManager.instance()
     val memoryCounterDelta = memoryManager.getMemoryFileStorageCounter - memoryCounterBefore
     if (memoryCounterDelta > 0) {
-      memoryManager.releaseMemoryFileStorage(memoryCounterDelta.toInt)
+      memoryManager.releaseMemoryFileStorage(Math.toIntExact(memoryCounterDelta))
     } else if (memoryCounterDelta < 0) {
-      memoryManager.incrementMemoryFileStorage((-memoryCounterDelta).toInt)
+      memoryManager.incrementMemoryFileStorage(Math.toIntExact(-memoryCounterDelta))
     }
     val diskCounterDelta = memoryManager.getDiskBufferCounter.get() - diskCounterBefore
     if (diskCounterDelta > 0) {
-      memoryManager.releaseDiskBuffer(diskCounterDelta.toInt)
+      memoryManager.releaseDiskBuffer(Math.toIntExact(diskCounterDelta))
     } else if (diskCounterDelta < 0) {
-      memoryManager.incrementDiskBuffer((-diskCounterDelta).toInt)
+      memoryManager.incrementDiskBuffer(Math.toIntExact(-diskCounterDelta))
     }
   }
 
