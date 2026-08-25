@@ -24,6 +24,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 import scala.collection.JavaConverters.asScalaBufferConverter
+import scala.util.control.NonFatal
 
 import io.netty.buffer.{ByteBuf, CompositeByteBuf}
 import org.apache.hadoop.fs.{FileSystem, FSDataOutputStream}
@@ -98,7 +99,7 @@ abstract class TierWriterBase(
     try {
       flushBuffer.addComponent(true, buf)
     } catch {
-      case t: Throwable =>
+      case t: Throwable if t.isInstanceOf[OutOfMemoryError] || NonFatal(t) =>
         // addComponent can fail after taking ownership while consolidating components.
         val componentAdded =
           flushBuffer.writerIndex() != writerIndexBefore ||
