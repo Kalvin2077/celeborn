@@ -44,6 +44,11 @@ class TierWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     override def readableBytes(): Int = virtualSize
   }
 
+  private class PreInsertionOomByteBuf(buffer: ByteBuf, failure: OutOfMemoryError)
+    extends DuplicatedByteBuf(buffer) {
+    override def readerIndex(): Int = throw failure
+  }
+
   private class OomByteBufAllocator(failure: OutOfMemoryError)
     extends AbstractByteBufAllocator(false) {
     override protected def newHeapBuffer(initialCapacity: Int, maxCapacity: Int): ByteBuf =
@@ -384,6 +389,44 @@ class TierWriterSuite extends AnyFunSuite with BeforeAndAfterEach {
     val fileLen = localTierWriter.close()
     assert(fileLen == 10240)
     assert(localTierWriter.closed === true)
+  }
+
+  test("memory tier writer should preserve state on pre-insertion OOM") {
+    val memoryTierWriter = prepareMemoryWriter
+    val failure = new OutOfMemoryError("component creation failed")
+    val buf = new PreInsertionOomByteBuf(
+      WriterUtils.generateSparkFormatData(UnpooledByteBufAllocator.DEFAULT, 0),
+      failure)
+    val refCntBeforeWrite = buf.refCnt()
+    val memoryManager = MemoryManager.instance()
+    val memoryCounterBefore = memoryManager.getMemoryFileStorageCounter
+    val diskCounterBefore = memoryManager.getDiskBufferCounter.get()
+    val fileLengthBefore = memoryTierWriter.fileInfo.getFileLength
+    val writerIndexBefore = memoryTierWriter.flushBuffer.writerIndex()
+    val numComponentsBefore = memoryTierWriter.flushBuffer.numComponents()
+    var callerReferenceReleased = false
+
+    try {
+      memoryTierWriter.numPendingWrites.incrementAndGet()
+      val thrown = intercept[OutOfMemoryError](memoryTierWriter.write(buf))
+
+      assert(thrown eq failure)
+      assert(memoryTierWriter.flushBuffer.writerIndex() === writerIndexBefore)
+      assert(memoryTierWriter.flushBuffer.numComponents() === numComponentsBefore)
+      assert(memoryManager.getMemoryFileStorageCounter === memoryCounterBefore)
+      assert(memoryManager.getDiskBufferCounter.get() === diskCounterBefore)
+      assert(memoryTierWriter.fileInfo.getFileLength === fileLengthBefore)
+      assert(buf.refCnt() === refCntBeforeWrite)
+      assert(buf.release())
+      callerReferenceReleased = true
+      assert(buf.refCnt() === 0)
+    } finally {
+      memoryTierWriter.destroy(new IOException("test cleanup"))
+      restoreCounters(memoryCounterBefore, diskCounterBefore)
+      if (!callerReferenceReleased && buf.refCnt() > 0) {
+        buf.release(buf.refCnt())
+      }
+    }
   }
 
   test("memory tier writer should preserve state on composite buffer capacity overflow") {
