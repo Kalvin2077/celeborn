@@ -958,22 +958,11 @@ private[celeborn] class Master(
       return
     }
 
-    val numWorkers = Math.min(
-      Math.max(
-        if (requestSlots.shouldReplicate) 2 else 1,
-        if (requestSlots.maxWorkers <= 0) slotsAssignMaxWorkers
-        else Math.min(slotsAssignMaxWorkers, requestSlots.maxWorkers)),
-      numAvailableWorkers)
-    val startIndex = Random.nextInt(numAvailableWorkers)
-    val selectedWorkers = new util.ArrayList[WorkerInfo](numWorkers)
-    selectedWorkers.addAll(availableWorkers.subList(
-      startIndex,
-      Math.min(numAvailableWorkers, startIndex + numWorkers)))
-    if (startIndex + numWorkers > numAvailableWorkers) {
-      selectedWorkers.addAll(availableWorkers.subList(
-        0,
-        startIndex + numWorkers - numAvailableWorkers))
-    }
+    val selectedWorkers = selectWorkers(
+      availableWorkers,
+      requestSlots.maxWorkers,
+      slotsAssignMaxWorkers,
+      requestSlots.shouldReplicate)
     // offer slots
     val slots =
       masterSource.sample(MasterSource.OFFER_SLOTS_TIME, s"offerSlots-${Random.nextInt()}") {
@@ -1056,35 +1045,31 @@ private[celeborn] class Master(
       requestSlots.packed))
   }
 
-  private def selectWorkersForRequest(
-      requestWorkers: PbRequestWorkers,
-      availableWorkers: util.List[WorkerInfo]): util.List[WorkerInfo] = {
-    val maxWorkers =
-      if (requestWorkers.getMaxWorkers <= 0) splitSlotAssignMaxWorkers
-      else Math.min(splitSlotAssignMaxWorkers, requestWorkers.getMaxWorkers)
-    val eligibleWorkers = new util.ArrayList[WorkerInfo]()
-    availableWorkers.asScala
-      .filter { worker =>
-        !StorageInfo.localDiskAvailable(requestWorkers.getAvailableStorageTypes) ||
-        worker.haveDisk
-      }
-      .foreach(eligibleWorkers.add)
-    if (eligibleWorkers.isEmpty) {
+  private def selectWorkers(
+      candidates: util.List[WorkerInfo],
+      numSelectMax: Int,
+      numAssignMax: Int,
+      shouldReplicate: Boolean): util.List[WorkerInfo] = {
+    val numCandidates = candidates.size()
+    if (numCandidates == 0) {
       return Collections.emptyList()
     }
 
-    val minWorkers = if (requestWorkers.getShouldReplicate) 2 else 1
-    val selectedWorkerCount =
-      Math.min(Math.max(minWorkers, maxWorkers), eligibleWorkers.size)
-    val startIndex = ThreadLocalRandom.current().nextInt(eligibleWorkers.size)
-    val selectedWorkers = new util.ArrayList[WorkerInfo](selectedWorkerCount)
-    selectedWorkers.addAll(eligibleWorkers.subList(
+    val numWorkers = Math.min(
+      Math.max(
+        if (shouldReplicate) 2 else 1,
+        if (numSelectMax <= 0) numAssignMax
+        else Math.min(numAssignMax, numSelectMax)),
+      numCandidates)
+    val startIndex = ThreadLocalRandom.current().nextInt(numCandidates)
+    val selectedWorkers = new util.ArrayList[WorkerInfo](numWorkers)
+    selectedWorkers.addAll(candidates.subList(
       startIndex,
-      Math.min(eligibleWorkers.size, startIndex + selectedWorkerCount)))
-    if (startIndex + selectedWorkerCount > eligibleWorkers.size) {
-      selectedWorkers.addAll(eligibleWorkers.subList(
+      Math.min(numCandidates, startIndex + numWorkers)))
+    if (startIndex + numWorkers > numCandidates) {
+      selectedWorkers.addAll(candidates.subList(
         0,
-        startIndex + selectedWorkerCount - eligibleWorkers.size))
+        startIndex + numWorkers - numCandidates))
     }
     selectedWorkers
   }
@@ -1111,7 +1096,18 @@ private[celeborn] class Master(
       return
     }
 
-    val selectedWorkers = selectWorkersForRequest(requestWorkers, availableWorkers)
+    val candidates = new util.ArrayList[WorkerInfo]()
+    availableWorkers.asScala
+      .filter { worker =>
+        !StorageInfo.localDiskAvailable(requestWorkers.getAvailableStorageTypes) ||
+        worker.haveDisk
+      }
+      .foreach(candidates.add)
+    val selectedWorkers = selectWorkers(
+      candidates,
+      requestWorkers.getMaxWorkers,
+      splitSlotAssignMaxWorkers,
+      requestWorkers.getShouldReplicate)
     if (selectedWorkers.isEmpty) {
       logWarning(
         s"Offer workers for ${requestWorkers.getApplicationId} failed due to no eligible workers.")
