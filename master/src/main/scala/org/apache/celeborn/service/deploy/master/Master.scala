@@ -206,6 +206,7 @@ private[celeborn] class Master(
   private val tagsManager = new TagsManager(Option(configService))
 
   private val slotsAssignMaxWorkers = conf.masterSlotAssignMaxWorkers
+  private val splitSlotAssignMaxWorkers = conf.masterSplitSlotAssignMaxWorkers
   private val slotsAssignMinWorkers = conf.masterSlotAssignMinWorkers
   private val slotsAssignExtraSlots = conf.masterSlotAssignExtraSlots
   private val slotsAssignStrategyManager =
