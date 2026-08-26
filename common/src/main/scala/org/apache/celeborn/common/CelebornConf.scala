@@ -659,7 +659,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
   def masterSlotAssignPolicyName: String = get(MASTER_SLOT_ASSIGN_POLICY)
 
   /** Returns the configured built-in policy. Use `masterSlotAssignPolicyName` for SPI providers. */
-  @deprecated("Use masterSlotAssignPolicyName for SPI provider selection", "0.7.0")
+  @deprecated("Use masterSlotAssignPolicyName for SPI provider selection", "1.0.0")
   def masterSlotAssignPolicy: SlotsAssignPolicy =
     SlotsAssignPolicy.valueOf(get(MASTER_SLOT_ASSIGN_POLICY))
 
@@ -3227,7 +3227,7 @@ object CelebornConf extends Logging {
   val MASTER_SPLIT_SLOT_ASSIGN_MAX_WORKERS: ConfigEntry[Int] =
     buildConf("celeborn.master.splitSlot.assign.maxWorkers")
       .categories("master")
-      .version("0.7.0")
+      .version("1.0.0")
       .doc("Maximum workers returned by each dynamic candidate refresh. The request limit is the " +
         "smaller positive value of this setting and `celeborn.client.slot.assign.maxWorkers`. " +
         "For replicated shuffle, an effective limit of one is raised to two. Workers already " +
@@ -5626,7 +5626,7 @@ object CelebornConf extends Logging {
   val CLIENT_SHUFFLE_DYNAMIC_RESOURCE_UPDATE_TIME: ConfigEntry[Long] =
     buildConf("celeborn.client.shuffle.dynamicResource.updateTime")
       .categories("client")
-      .version("0.7.0")
+      .version("1.0.0")
       .doc(
         "Minimum interval after a worker-candidate refresh attempt completes before " +
           s"ChangePartitionManager may try again when `${CLIENT_SHUFFLE_DYNAMIC_RESOURCE_ENABLED.key}` " +
