@@ -285,8 +285,8 @@ public class DfsPartitionReader implements PartitionReader {
                 logger.debug("add index {} to results", currentChunkIndex++);
               }
             } catch (InterruptedException e) {
-              // cancel a task for speculative, ignore this exception
               logger.warn("Read thread is interrupted.", e);
+              exception.set(e);
             } catch (Throwable t) {
               logger.error("Read thread encountered error.", t);
               if (t instanceof Exception) {
