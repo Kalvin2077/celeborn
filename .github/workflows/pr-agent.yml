@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Review shadow PR
-        uses: docker://pragent/pr-agent:0.41.0-github_action
+        uses: the-pr-agent/pr-agent@main
 
         env:
           # GitHub
