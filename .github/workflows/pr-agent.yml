@@ -2,37 +2,68 @@ name: PR Agent
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize]
+    types:
+      - opened
+      - reopened
+      - synchronize
 
 jobs:
   review:
-    if: ${{ github.event.sender.type != 'Bot' && startsWith(github.event.pull_request.head.ref, 'review-head/pr-') }}
+    # Only review our shadow PRs.
+    if: >-
+      ${{
+        github.event.sender.type != 'Bot' &&
+        startsWith(
+          github.event.pull_request.head.ref,
+          'review-head/pr-'
+        )
+      }}
 
     runs-on: ubuntu-latest
 
     permissions:
+      contents: read
       pull-requests: write
       issues: write
 
     steps:
       - name: Review shadow PR
         uses: docker://pragent/pr-agent:0.41.0-github_action
+
         env:
+          # GitHub
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+          # OpenAI-compatible API
           OPENAI_KEY: ${{ secrets.PR_AGENT_API_KEY }}
           OPENAI.API_BASE: ${{ vars.PR_AGENT_API_BASE }}
 
+          # Model
           config.model: ${{ vars.PR_AGENT_MODEL }}
           config.fallback_models: '[]'
 
-          # Least privilege: never modify repository contents
+          # qwen3.8-max supports ~1M context.
+          # Tell PR-Agent the real model capability, but cap each review at 128K.
+          config.custom_model_max_tokens: "1000000"
+          config.max_model_tokens: "128000"
+
+          # Security
           config.restricted_mode: "true"
 
-          # Temporarily verbose while we validate the setup
+          # Debugging / fail correctly
           config.verbosity_level: "2"
+          config.log_level: "DEBUG"
+          config.propagate_tool_errors: "true"
 
+          # Shadow branch review-head/pr-3775 refers to upstream PR #3775,
+          # not Kalvin2077/celeborn issue #3775.
+          config.extract_issue_from_branch: "false"
+          pr_reviewer.require_ticket_analysis_review: "false"
+
+          # Review only for now
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "false"
           github_action_config.auto_improve: "false"
-          github_action_config.pr_actions: '["opened", "reopened", "synchronize"]'
+
+          github_action_config.pr_actions: >-
+            ["opened", "reopened", "synchronize"]
