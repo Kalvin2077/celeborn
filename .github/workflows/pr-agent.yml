@@ -6,12 +6,11 @@ on:
 
 jobs:
   review:
-    if: ${{ github.event.sender.type != 'Bot' && startsWith(github.head_ref, 'review-head/pr-') }}
+    if: ${{ github.event.sender.type != 'Bot' && startsWith(github.event.pull_request.head.ref, 'review-head/pr-') }}
 
     runs-on: ubuntu-latest
 
     permissions:
-      contents: read
       pull-requests: write
       issues: write
 
@@ -26,6 +25,12 @@ jobs:
 
           config.model: ${{ vars.PR_AGENT_MODEL }}
           config.fallback_models: '[]'
+
+          # Least privilege: never modify repository contents
+          config.restricted_mode: "true"
+
+          # Temporarily verbose while we validate the setup
+          config.verbosity_level: "2"
 
           github_action_config.auto_review: "true"
           github_action_config.auto_describe: "false"
