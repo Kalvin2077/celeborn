@@ -29,6 +29,7 @@ import org.roaringbitmap.RoaringBitmap
 import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{DiskInfo, WorkerInfo, WorkerStatus}
+import org.apache.celeborn.common.metrics.WorkerStats
 import org.apache.celeborn.common.network.protocol.{SerdeVersion, TransportMessage}
 import org.apache.celeborn.common.protocol._
 import org.apache.celeborn.common.protocol.MessageType._
@@ -123,6 +124,7 @@ object ControlMessages extends Logging {
       activeShuffleKeys: util.Set[String],
       highWorkload: Boolean,
       workerStatus: WorkerStatus,
+      workerStats: Option[WorkerStats] = None,
       override var requestId: String = ZERO_UUID) extends MasterRequestMessage
 
   case class HeartbeatFromWorkerResponse(
@@ -602,11 +604,12 @@ object ControlMessages extends Logging {
           activeShuffleKeys,
           highWorkload,
           workerStatus,
+          workerStats,
           requestId) =>
       val pbDisks = disks.map(PbSerDeUtils.toPbDiskInfo).asJava
       val pbUserResourceConsumption =
         PbSerDeUtils.toPbUserResourceConsumption(userResourceConsumption)
-      val payload = PbHeartbeatFromWorker.newBuilder()
+      val builder = PbHeartbeatFromWorker.newBuilder()
         .setHost(host)
         .setRpcPort(rpcPort)
         .setPushPort(pushPort)
@@ -617,6 +620,9 @@ object ControlMessages extends Logging {
         .addAllActiveShuffleKeys(activeShuffleKeys)
         .setHighWorkload(highWorkload)
         .setWorkerStatus(PbSerDeUtils.toPbWorkerStatus(workerStatus))
+      workerStats.foreach(stats =>
+        builder.setWorkerStats(PbSerDeUtils.toPbWorkerStats(stats)))
+      val payload = builder
         .setRequestId(requestId)
         .build().toByteArray
       new TransportMessage(MessageType.HEARTBEAT_FROM_WORKER, payload)
@@ -1103,6 +1109,12 @@ object ControlMessages extends Logging {
         }
 
         val workerStatus = PbSerDeUtils.fromPbWorkerStatus(pbHeartbeatFromWorker.getWorkerStatus)
+        val workerStats =
+          if (pbHeartbeatFromWorker.hasWorkerStats) {
+            Some(PbSerDeUtils.fromPbWorkerStats(pbHeartbeatFromWorker.getWorkerStats))
+          } else {
+            None
+          }
 
         HeartbeatFromWorker(
           pbHeartbeatFromWorker.getHost,
@@ -1115,6 +1127,7 @@ object ControlMessages extends Logging {
           activeShuffleKeys,
           pbHeartbeatFromWorker.getHighWorkload,
           workerStatus,
+          workerStats,
           pbHeartbeatFromWorker.getRequestId)
 
       case HEARTBEAT_FROM_WORKER_RESPONSE_VALUE =>

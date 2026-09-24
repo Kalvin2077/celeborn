@@ -27,6 +27,7 @@ import com.google.protobuf.InvalidProtocolBufferException
 import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.meta.{ApplicationInfo, ApplicationMeta, DeviceInfo, DiskFileInfo, DiskInfo, MapFileMeta, ReduceFileMeta, WorkerEventInfo, WorkerInfo, WorkerStatus}
 import org.apache.celeborn.common.meta.MapFileMeta.SegmentIndex
+import org.apache.celeborn.common.metrics._
 import org.apache.celeborn.common.protocol._
 import org.apache.celeborn.common.protocol.PartitionLocation.Mode
 import org.apache.celeborn.common.protocol.message.ControlMessages.WorkerResource
@@ -538,6 +539,96 @@ object PbSerDeUtils {
 
   def fromPbWorkerStatus(pbWorkerStatus: PbWorkerStatus): WorkerStatus = {
     new WorkerStatus(pbWorkerStatus.getState.getNumber, pbWorkerStatus.getStateStartTime)
+  }
+
+  def toPbWorkerStats(stats: WorkerStats): PbWorkerStats = {
+    val metrics = stats.metrics.map(toPbWorkerMetric).asJava
+    PbWorkerStats.newBuilder()
+      .setTimestamp(stats.timestamp)
+      .addAllMetrics(metrics)
+      .build()
+  }
+
+  def fromPbWorkerStats(pbWorkerStats: PbWorkerStats): WorkerStats = {
+    WorkerStats(
+      pbWorkerStats.getTimestamp,
+      pbWorkerStats.getMetricsList.asScala.map(fromPbWorkerMetric).toList)
+  }
+
+  private def toPbWorkerMetric(metric: WorkerMetric): PbWorkerMetric = {
+    val builder = PbWorkerMetric.newBuilder()
+      .setName(metric.name)
+      .setUnit(toPbMetricUnit(metric.unit))
+      .setStatus(toPbMetricStatus(metric.status))
+      .setObservationTime(metric.observationTime)
+      .setSampleCount(metric.sampleCount)
+      .setWindowStartTime(metric.windowStartTime)
+      .setWindowEndTime(metric.windowEndTime)
+    metric.value match {
+      case Some(DoubleMetricValue(value)) =>
+        builder.setDoubleValue(value)
+      case Some(LongMetricValue(value)) =>
+        builder.setLongValue(value)
+      case None =>
+    }
+    builder.build()
+  }
+
+  private def fromPbWorkerMetric(pbWorkerMetric: PbWorkerMetric): WorkerMetric = {
+    val unit = fromPbMetricUnit(pbWorkerMetric.getUnit)
+    val status = fromPbMetricStatus(pbWorkerMetric.getStatus)
+    val hasValue = pbWorkerMetric.hasDoubleValue() || pbWorkerMetric.hasLongValue()
+    if (hasValue && status != MetricStatus.Valid) {
+      throw new IllegalArgumentException("A non-valid worker metric must not carry a value")
+    }
+    if (!hasValue && status == MetricStatus.Valid) {
+      throw new IllegalArgumentException("A valid worker metric requires a value")
+    }
+    val value =
+      if (pbWorkerMetric.hasDoubleValue()) {
+        Some(DoubleMetricValue(pbWorkerMetric.getDoubleValue))
+      } else if (pbWorkerMetric.hasLongValue()) {
+        Some(LongMetricValue(pbWorkerMetric.getLongValue))
+      } else {
+        None
+      }
+    WorkerMetric(
+      pbWorkerMetric.getName,
+      value,
+      unit,
+      status,
+      pbWorkerMetric.getObservationTime,
+      pbWorkerMetric.getSampleCount,
+      pbWorkerMetric.getWindowStartTime,
+      pbWorkerMetric.getWindowEndTime)
+  }
+
+  private def toPbMetricUnit(unit: MetricUnit): PbWorkerMetric.Unit = unit match {
+    case MetricUnit.Ratio => PbWorkerMetric.Unit.Ratio
+    case MetricUnit.Bytes => PbWorkerMetric.Unit.Bytes
+    case MetricUnit.BytesPerSecond => PbWorkerMetric.Unit.BytesPerSecond
+  }
+
+  private def fromPbMetricUnit(unit: PbWorkerMetric.Unit): MetricUnit = unit match {
+    case PbWorkerMetric.Unit.Ratio => MetricUnit.Ratio
+    case PbWorkerMetric.Unit.Bytes => MetricUnit.Bytes
+    case PbWorkerMetric.Unit.BytesPerSecond => MetricUnit.BytesPerSecond
+    case _ => throw new IllegalArgumentException(s"Unsupported worker metric unit: $unit")
+  }
+
+  private def toPbMetricStatus(status: MetricStatus): PbWorkerMetric.Status = status match {
+    case MetricStatus.Valid => PbWorkerMetric.Status.Valid
+    case MetricStatus.WarmingUp => PbWorkerMetric.Status.WarmingUp
+    case MetricStatus.Unavailable => PbWorkerMetric.Status.Unavailable
+    case MetricStatus.Failed => PbWorkerMetric.Status.Failed
+  }
+
+  private def fromPbMetricStatus(status: PbWorkerMetric.Status): MetricStatus = status match {
+    case PbWorkerMetric.Status.Valid => MetricStatus.Valid
+    case PbWorkerMetric.Status.WarmingUp => MetricStatus.WarmingUp
+    case PbWorkerMetric.Status.Unavailable => MetricStatus.Unavailable
+    case PbWorkerMetric.Status.Failed => MetricStatus.Failed
+    case _ => throw new IllegalArgumentException(s"Unsupported worker metric status: $status")
   }
 
   def toPbWorkerEventInfo(workerEventInfo: WorkerEventInfo): PbWorkerEventInfo = {

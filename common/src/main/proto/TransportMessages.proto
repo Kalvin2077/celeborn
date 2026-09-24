@@ -236,6 +236,7 @@ message PbHeartbeatFromWorker {
   map<string, int64> estimatedAppDiskUsage = 10;
   bool highWorkload = 11;
   PbWorkerStatus workerStatus = 12;
+  PbWorkerStats workerStats = 13;
 }
 
 message PbMetaWorkerHeartbeatRequest {
@@ -265,6 +266,38 @@ message PbWorkerStatus {
 
   State state = 1;
   int64 stateStartTime = 2;
+}
+
+message PbWorkerStats {
+  int64 timestamp = 1;
+  repeated PbWorkerMetric metrics = 2;
+}
+
+message PbWorkerMetric {
+  enum Unit {
+    Ratio = 0;
+    Bytes = 1;
+    BytesPerSecond = 2;
+  }
+
+  enum Status {
+    Valid = 0;
+    WarmingUp = 1;
+    Unavailable = 2;
+    Failed = 3;
+  }
+
+  string name = 1;
+  Unit unit = 2;
+  Status status = 3;
+  oneof value {
+    double doubleValue = 4;
+    int64 longValue = 5;
+  }
+  int64 observationTime = 6;
+  int32 sampleCount = 7;
+  int64 windowStartTime = 8;
+  int64 windowEndTime = 9;
 }
 
 message PbHeartbeatFromWorkerResponse {
