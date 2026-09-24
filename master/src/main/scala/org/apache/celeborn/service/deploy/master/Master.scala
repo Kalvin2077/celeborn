@@ -42,6 +42,7 @@ import org.apache.celeborn.common.identity.UserIdentifier
 import org.apache.celeborn.common.internal.Logging
 import org.apache.celeborn.common.meta.{DiskInfo, WorkerInfo, WorkerStatus}
 import org.apache.celeborn.common.metrics.MetricsSystem
+import org.apache.celeborn.common.metrics.WorkerStats
 import org.apache.celeborn.common.metrics.source.{JVMCPUSource, JVMSource, ResourceConsumptionSource, Role, SystemMiscSource, ThreadPoolSource}
 import org.apache.celeborn.common.network.CelebornRackResolver
 import org.apache.celeborn.common.network.protocol.{TransportMessage, TransportMessagesHelper}
@@ -176,6 +177,7 @@ private[celeborn] class Master(
     } else {
       new SingleMasterMetaManager(internalRpcEnvInUse, conf, rackResolver)
     }
+  private[celeborn] val workerStatsStore = new WorkerStatsStore
   secretRegistry.setMetadataHandler(statusSystem)
 
   // Threads
@@ -571,6 +573,7 @@ private[celeborn] class Master(
           activeShuffleKey,
           highWorkload,
           workerStatus,
+          workerStats,
           requestId) =>
       logDebug(s"Received heartbeat from" +
         s" worker $host:$rpcPort:$pushPort:$fetchPort:$replicatePort with $disks.")
@@ -588,6 +591,7 @@ private[celeborn] class Master(
           activeShuffleKey,
           highWorkload,
           workerStatus,
+          workerStats,
           requestId))
 
     case ReportWorkerUnavailable(failedWorkers: util.List[WorkerInfo], requestId: String) =>
@@ -731,13 +735,16 @@ private[celeborn] class Master(
       activeShuffleKeys: util.Set[String],
       highWorkload: Boolean,
       workerStatus: WorkerStatus,
+      workerStats: Option[WorkerStats],
       requestId: String): Unit = {
     val targetWorker = new WorkerInfo(host, rpcPort, pushPort, fetchPort, replicatePort)
     val registered = statusSystem.workersMap.containsKey(targetWorker.toUniqueId)
     if (!registered) {
       logWarning(s"Received heartbeat from unknown worker " +
         s"$host:$rpcPort:$pushPort:$fetchPort:$replicatePort.")
+      workerStatsStore.remove(targetWorker)
     } else {
+      workerStats.foreach(workerStatsStore.update(targetWorker, _))
       statusSystem.handleWorkerHeartbeat(
         host,
         rpcPort,
@@ -834,6 +841,7 @@ private[celeborn] class Master(
         s" for WorkerLost handler!")
     } else {
       statusSystem.handleWorkerLost(host, rpcPort, pushPort, fetchPort, replicatePort, requestId)
+      workerStatsStore.remove(worker)
     }
     if (context != null) {
       context.reply(WorkerLostResponse(true))
