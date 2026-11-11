@@ -115,6 +115,7 @@ class ApplicationHeartbeater(
             val response = requestHeartbeat(appHeartbeat)
             if (response.statusCode == StatusCode.SUCCESS) {
               logDebug("Successfully send app heartbeat.")
+              // k 应用 Driver 在这里接收 Master 的 excluded/unknown/shutting Worker 视图，而非由 Worker 直接通知。
               workerStatusTracker.handleHeartbeatResponse(response)
               checkQuotaExceeds(response.checkQuotaResponse)
               // revise shuffle id if there are lost shuffles

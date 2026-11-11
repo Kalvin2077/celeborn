@@ -1014,6 +1014,7 @@ class CelebornConf(loadDefaults: Boolean) extends Cloneable with Logging with Se
     if (clientApplicationUUIDSuffixEnabled) {
       appId + "-" + UUID.randomUUID().toString.replaceAll("-", "")
     } else {
+      // k default
       appId
     }
   }
@@ -5976,6 +5977,7 @@ object CelebornConf extends Logging {
       .stringConf
       .transform(_.toUpperCase(Locale.ROOT))
       .checkValues(Set(ShuffleMode.HASH.name, ShuffleMode.SORT.name))
+      // k 默认走 HashBasedShuffleWriter；dynamic write mode 可在运行时按 partition 数切到 SORT。
       .createWithDefault(ShuffleMode.HASH.name)
 
   val CLIENT_PUSH_UNSAFEROW_FASTWRITE_ENABLED: ConfigEntry[Boolean] =

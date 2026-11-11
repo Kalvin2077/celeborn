@@ -50,6 +50,7 @@ import org.apache.celeborn.common.protocol.message.{ControlMessages, StatusCode}
 import org.apache.celeborn.common.protocol.message.ControlMessages.GetReducerFileGroupResponse
 import org.apache.celeborn.common.util.{ExceptionUtils, JavaUtils, ThreadUtils, Utils}
 
+// k 一个 CelebornShuffleReader 对应一个 Spark reduce task 要读取的 partition/map range。
 class CelebornShuffleReader[K, C](
     handle: CelebornShuffleHandle[K, _, C],
     startPartition: Int,
@@ -109,9 +110,11 @@ class CelebornShuffleReader[K, C](
     true,
     cryptoHandler)
 
+  // k 读完 Celeborn 字节后，仍由 Spark ShuffleDependency 决定反序列化、聚合和排序语义。
   private val dep = handle.dependency
 
   @VisibleForTesting
+  // k 使用 handle 中的 application/LM 地址获取或复用 Executor 内 ShuffleClient。
   val shuffleClient = ShuffleClient.get(
     handle.appUniqueId,
     handle.lifecycleManagerHost,
@@ -130,9 +133,11 @@ class CelebornShuffleReader[K, C](
   override def read(): Iterator[Product2[K, C]] = {
 
     val startTime = System.currentTimeMillis()
+    // k 创建与 writer 使用同一 ShuffleDependency.serializer 对应的反序列化器。
     val serializerInstance = newSerializerInstance(dep)
     val shuffleId =
       try {
+        // k 开启 stage rerun 时查本次 stage attempt 的 Celeborn 物理 shuffleId；否则仍是 Spark shuffleId。
         SparkUtils.celebornShuffleId(shuffleClient, handle, context, false)
       } catch {
         case e: CelebornRuntimeException =>
@@ -183,6 +188,7 @@ class CelebornShuffleReader[K, C](
     var fileGroups: ReduceFileGroups = null
     var isShuffleStageEnd: Boolean = false
     var updateFileGroupsRetryTimes = 0
+    // k GetReducerFileGroup 早于 final commit 时会在 Driver 挂起；RPC 超时且 stage 未结束则继续重试。
     do {
       isShuffleStageEnd =
         try {
@@ -194,6 +200,8 @@ class CelebornShuffleReader[K, C](
         }
       try {
         // startPartition is irrelevant
+        // k 控制面：向 Driver LifecycleManager 查 commit 后的 ReduceFileGroups，并按 shuffleId 缓存。
+        // k 结果包含 partitionId -> PartitionLocations、有效 mapAttempts 和失败 batch 信息。
         fileGroups = shuffleClient.updateFileGroup(shuffleId, startPartition)
       } catch {
         case ce: CelebornIOException
@@ -230,6 +238,7 @@ class CelebornShuffleReader[K, C](
       ClientUtils.readSkewPartitionWithoutMapRange(conf, startMapIndex, endMapIndex)
 
     // filter empty partition
+    // k Spark 要读 [startPartition, endPartition)，其中没有 commit 文件的空 partition 直接跳过。
     val partitionIdList = List.range(startPartition, endPartition).filter(p =>
       fileGroups.partitionGroups.containsKey(p))
 
@@ -241,6 +250,7 @@ class CelebornShuffleReader[K, C](
     def makeOpenStreamList(locations: JSet[PartitionLocation]): Unit = {
       locations.asScala.foreach { location =>
         partCnt += 1
+        // k 数据面不经 Master/Driver：Executor 直接连接 PartitionLocation 所在 Worker 的 fetchPort。
         val hostPort = location.hostAndFetchPort
         if (!workerRequestMap.containsKey(hostPort)) {
           CelebornShuffleReader.tryCreateClientOncePerEndpoint(
@@ -266,6 +276,7 @@ class CelebornShuffleReader[K, C](
         workerRequestMap.get(hostPort) match {
           case (_, locArr, pbOpenStreamListBuilder) =>
             locArr.add(location)
+            // k 建流请求只携带文件名和 map range，不携带 shuffle payload。
             pbOpenStreamListBuilder.addFileName(location.getFileName)
               .addStartIndex(startMapIndex)
               .addEndIndex(endMapIndex)
@@ -369,6 +380,7 @@ class CelebornShuffleReader[K, C](
     val locationStreamHandlerMap: ConcurrentHashMap[PartitionLocation, PbStreamHandler] =
       JavaUtils.newConcurrentHashMap()
 
+    // k 每个 Worker 只发一个 BATCH_OPEN_STREAM，批量为该 Worker 上的所有目标文件注册 stream。
     val futures = workerRequestMap.values().asScala.map { entry =>
       streamCreatorPool.submit(new Runnable {
         override def run(): Unit = {
@@ -378,6 +390,7 @@ class CelebornShuffleReader[K, C](
             pbOpenStreamListBuilder.build().toByteArray)
           val pbOpenStreamListResponse =
             try {
+              // k 这个 RPC 同步返回 streamId/numChunks，还没有传输 chunk 数据。
               val response = client.sendRpcSync(msg.toByteBuffer, fetchTimeoutMs)
               TransportMessage.fromByteBuffer(response).getParsedPayload[PbOpenStreamListResponse]
             } catch {
@@ -435,6 +448,7 @@ class CelebornShuffleReader[K, C](
               0,
               0L)
           }
+          // k 用 PartitionLocations 和已打开的 streamHandlers 创建该 reduce partition 的 CelebornInputStream。
           val inputStream = shuffleClient.readPartition(
             shuffleId,
             handle.shuffleId,
@@ -474,6 +488,7 @@ class CelebornShuffleReader[K, C](
     })
 
     var curIndex = 0
+    // k creation window 只提前构造有限个 CelebornInputStream，Worker stream 已在上面的 batch open 注册。
     val recordIter = partitionIdList.iterator.map(partitionId => {
       if (handle.numMappers > 0) {
         val startFetchWait = System.nanoTime()
@@ -521,6 +536,7 @@ class CelebornShuffleReader[K, C](
     }).filter {
       case (_, inputStream) => inputStream != CelebornInputStream.empty()
     }.map { case (partitionId, inputStream) =>
+      // k payload 拉取由 InputStream 的读取/预取驱动，Spark serializer 再把明文字节恢复为 key/value。
       (partitionId, serializerInstance.deserializeStream(inputStream).asKeyValueIterator)
     }.flatMap { case (partitionId, iter) =>
       try {
@@ -547,6 +563,7 @@ class CelebornShuffleReader[K, C](
     val resultIter: Iterator[Product2[K, C]] = {
       // Sort the output if there is a sort ordering defined.
       if (dep.keyOrdering.isDefined) {
+        // k Celeborn 只返回数据字节；有 keyOrdering 时仍由 Spark ExternalSorter 完成 reduce-side sort。
         // Create an ExternalSorter to sort the data.
         val sorter: ExternalSorter[K, _, C] =
           if (dep.aggregator.isDefined) {
@@ -582,6 +599,7 @@ class CelebornShuffleReader[K, C](
         })
         CompletionIterator[Product2[K, C], Iterator[Product2[K, C]]](sorter.iterator, sorter.stop())
       } else if (dep.aggregator.isDefined) {
+        // k 无 ordering 但有 aggregator 时，由 Spark 在 reader 端合并 combiner 或 value。
         if (dep.mapSideCombine) {
           // We are reading values that are already combined
           val combinedKeyValuesIterator = interruptibleIter.asInstanceOf[Iterator[(K, C)]]

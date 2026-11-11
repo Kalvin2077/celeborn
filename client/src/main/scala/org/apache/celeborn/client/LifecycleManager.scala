@@ -395,6 +395,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     case RegisterShuffle(shuffleId, numMappers, numPartitions, serdeVersion) =>
       logDebug(s"Received RegisterShuffle request, " +
         s"$shuffleId, $numMappers, $numPartitions.")
+      // k 这才是 Celeborn 的远程 shuffle 注册：先请 Master 分配，再让 Worker reserve slot。
       offerAndReserveSlots(
         RegisterCallContext(context),
         serdeVersion,
@@ -858,6 +859,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     // First, request to get allocated slots from Primary
     val ids = new util.ArrayList[Integer](numPartitions)
     (0 until numPartitions).foreach(idx => ids.add(Integer.valueOf(idx)))
+    // k Master 为每个 reduce partition 选 primary/可选 replica Worker；Master 只分配，不创建 writer。
     val res = requestMasterRequestSlotsWithRetry(shuffleId, ids)
 
     res.status match {
@@ -904,6 +906,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
 
     // Third, for each slot, LifecycleManager should ask Worker to reserve the slot
     // and prepare the pushing data env.
+    // k 各 Worker 在 reserveSlots 中为分配给自己的 PartitionLocation 创建 PartitionDataWriter。
     val reserveSlotsSuccess =
       reserveSlotsWithRetry(
         shuffleId,
@@ -934,6 +937,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         allocatedWorkers.put(workerInfo.toUniqueId, partitionLocationInfo)
       }
       workerStatusTracker.addEndpointReadyWorkers(candidatesWorkers.asScala.toSet)
+      // k Driver 内保存 shuffle -> Worker/PartitionLocation，供 commit 和后续 read 生成 file group。
       shuffleAllocatedWorkers.put(shuffleId, allocatedWorkers)
       registeredShuffle.add(shuffleId)
       commitManager.registerShuffle(
@@ -943,6 +947,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         numPartitions)
 
       // Fifth, reply the allocated partition location to ShuffleClient.
+      // k 回包只给 primary PartitionLocation；Executor 缓存后才继续首批 push。
       logInfo(s"Handle RegisterShuffle Success for $shuffleId.")
       val allPrimaryPartitionLocations = slots.asScala.flatMap(_._2._1.asScala).toArray
       replyRegisterShuffle(RegisterShuffleResponse(
@@ -1040,6 +1045,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       serdeVersion: SerdeVersion,
       metrics: MapperMetrics): Unit = {
 
+    // k 记录每个 mapId 第一个成功汇报的 attempt，并判断是否已收齐所有 mapId。
     val (mapperAttemptFinishedSuccess, allMapperFinished) =
       commitManager.finishMapperAttempt(
         shuffleId,
@@ -1059,10 +1065,12 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       // last mapper finished. call mapper end
       logInfo(s"Last MapperEnd, call StageEnd with shuffleKey:" +
         s"shuffleId $shuffleId.")
+      // k 最后一个 mapper 只是把 StageEnd 放回 LifecycleManager 自己的消息队列。
       self.send(StageEnd(shuffleId))
     }
 
     // reply success
+    // k MapperEnd SUCCESS 只确认这个 map attempt 已登记；最后一个 map 的 CommitFiles 仍在异步 StageEnd 中。
     context.reply(MapperEndResponse(StatusCode.SUCCESS, serdeVersion))
   }
 
@@ -1074,6 +1082,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
     // If isSegmentGranularityVisible is set to true, the downstream reduce task may start early than upstream map task, e.g. flink hybrid shuffle.
     // Under these circumstances, there's a possibility that the shuffle might not yet be registered when the downstream reduce task send GetReduceFileGroup request,
     // so we shouldn't send a SHUFFLE_NOT_REGISTERED response directly, should enqueue this request to pending list, and response to the downstream reduce task the ReduceFileGroup when the upstream map task register shuffle done
+    // k 普通 Spark reduce 只读取已注册 shuffle；没有注册通常表示这个 stage 没有 shuffle 数据。
     if (!registeredShuffle.contains(shuffleId) && !isSegmentGranularityVisible) {
       logWarning(s"[handleGetReducerFileGroup] shuffle $shuffleId not registered, maybe no shuffle data within this stage.")
       context.reply(GetReducerFileGroupResponse(
@@ -1083,6 +1092,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
         serdeVersion = serdeVersion))
       return
     }
+    // k LifecycleManager 不去 Master 查位置；commit 后的文件组就在 Driver CommitManager 中。
     commitManager.handleGetReducerFileGroup(context, shuffleId, serdeVersion)
   }
 
@@ -1333,6 +1343,7 @@ class LifecycleManager(val appUniqueId: String, val conf: CelebornConf) extends 
       return
     }
 
+    // k 向所有相关 Worker 发 CommitFiles；Worker close writer 后，Driver 收集可读文件位置。
     if (commitManager.tryFinalCommit(shuffleId)) {
       // Here we only clear PartitionLocation info in shuffleAllocatedWorkers.
       // Since rerun or speculation task may running after we handle StageEnd.

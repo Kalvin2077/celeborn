@@ -59,6 +59,9 @@ abstract private[worker] class Flusher(
 
   init()
 
+  // k 后台 daemon thread 消费 FlushTask。PushData 成功只表示 PartitionDataWriter 已接受数据。
+  // k PushData 响应不等待 FlushTask 写完，更不等于 fsync。
+  // k CommitFiles 会调用 writer.close：finalFlush，等待 pending flush，再关闭 stream。
   private def init(): Unit = {
     for (i <- 0 until lastBeginFlushTime.length()) {
       lastBeginFlushTime.set(i, -1)

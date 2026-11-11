@@ -68,6 +68,7 @@ private[worker] class LocalFlushTask(
     } else {
       for (buffer <- buffers) {
         while (buffer.hasRemaining) {
+          // k 写入 FileChannel，可能仍在 OS page cache；这一行不等于 fsync 或物理落盘。
           fileChannel.write(buffer)
         }
       }

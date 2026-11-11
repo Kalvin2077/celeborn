@@ -55,6 +55,7 @@ import org.apache.celeborn.common.protocol.message.ControlMessages.MapperMetrics
 import org.apache.celeborn.common.util.Utils;
 
 @Private
+// k 默认 write 主干：record -> reduce partition -> 分区 buffer -> DataPusher -> ShuffleClient。
 public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
 
   private static final Logger logger = LoggerFactory.getLogger(HashBasedShuffleWriter.class);
@@ -115,6 +116,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       ShuffleWriteMetricsReporter metrics,
       SendBufferPool sendBufferPool)
       throws IOException {
+    // k 一个 writer 对应一个 Spark map task；mapId 就是该 task 处理的上游 partitionId。
     this.mapId = taskContext.partitionId();
     this.dep = handle.dependency();
     this.shuffleId = shuffleId;
@@ -142,11 +144,13 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     PUSH_BUFFER_INIT_SIZE = Math.min(conf.clientPushBufferInitialSize(), PUSH_BUFFER_MAX_SIZE);
 
     this.sendBufferPool = sendBufferPool;
+    // k sendBuffers[reducePartitionId] 分别累积发往各个 reduce partition 的序列化数据。
     sendBuffers = sendBufferPool.acquireBuffer(numPartitions);
     sendOffsets = new int[numPartitions];
 
     try {
       LinkedBlockingQueue<PushTask> pushTaskQueue = sendBufferPool.acquirePushTaskQueue();
+      // k map task 线程只把满 buffer 放入队列；DataPusher 的后台线程负责调用 ShuffleClient。
       dataPusher =
           new DataPusher(
               shuffleId,
@@ -169,7 +173,9 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
   public void write(scala.collection.Iterator<Product2<K, V>> records) throws IOException {
     boolean needCleanupPusher = true;
     try {
+      // k doWrite 消费 Spark 交给这个 map task 的全部 records。
       boolean iteratorHasNext = doWrite(records);
+      // k close 发送残留 buffer，等待所有异步 push，再汇报 MapperEnd。
       close(iteratorHasNext);
       needCleanupPusher = false;
     } catch (InterruptedException e) {
@@ -261,8 +267,10 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     while (records.hasNext()) {
       final Product2<K, ?> record = records.next();
       final K key = record._1();
+      // k Spark Partitioner 把 key 映射到目标 reduce partition。
       final int partitionId = partitioner.getPartition(key);
       serBuffer.reset();
+      // k 先把单条 key/value 序列化到临时 serBuffer。
       serOutputStream.writeKey(key, OBJECT_CLASS_TAG);
       serOutputStream.writeValue(record._2(), OBJECT_CLASS_TAG);
       serOutputStream.flush();
@@ -273,6 +281,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       if (serializedRecordSize > PUSH_BUFFER_MAX_SIZE) {
         pushGiantRecord(partitionId, serBuffer.getBuf(), serializedRecordSize);
       } else {
+        // k 再追加到该 reduce partition 专属的 sendBuffer；空间不足时会先 flush 旧 buffer。
         int offset = getOrUpdateOffset(partitionId, serializedRecordSize);
         byte[] buffer = getOrCreateBuffer(partitionId);
         System.arraycopy(serBuffer.getBuf(), 0, buffer, offset, serializedRecordSize);
@@ -328,6 +337,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     }
 
     if ((buffer.length - offset) < serializedRecordSize) {
+      // k buffer 已达上限且放不下当前 record，把旧数据交给 DataPusher。
       sendBuffers[partitionId] = flushSendBuffer(partitionId, buffer, offset);
       updateRecordsWrittenMetrics();
       offset = 0;
@@ -340,6 +350,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
       throws IOException, InterruptedException {
     long start = System.nanoTime();
     if (logger.isDebugEnabled()) logger.debug("Flush buffer, size {}.", Utils.bytesToString(size));
+    // k addTask 会复制有效字节并入队，这一行不直接执行网络发送。
     byte[] newBuffer = dataPusher.addTaskAndSwapBuffer(partitionId, buffer, size);
     writeMetrics.incWriteTime(System.nanoTime() - start);
     uncompressedBytesWritten += size;
@@ -353,6 +364,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     for (int i = 0; i < numPartitions; i++) {
       final int size = sendOffsets[i];
       if (size > 0) {
+        // k 收尾数据通过 mergeData 按 Worker 地址聚合，减少小请求。
         mergeData(i, sendBuffers[i], 0, size);
       }
     }
@@ -392,6 +404,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     // Send the remaining data in sendBuffer
     long pushMergedDataTime = System.nanoTime();
     closeWrite();
+    // k 立即发出 ShuffleClient 中尚未发送的 merged batches。
     shuffleClient.pushMergedData(shuffleId, mapId, encodedAttemptId);
     writeMetrics.incWriteTime(System.nanoTime() - pushMergedDataTime);
     updateRecordsWrittenMetrics();
@@ -403,8 +416,11 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     SparkUtils.assertIteratorFullyConsumed(iteratorHasNext);
 
     long waitStartTime = System.nanoTime();
+    // k 先等 DataPusher 把队列中的 PushTask 全部提交给 ShuffleClient。
     dataPusher.waitOnTermination();
     sendBufferPool.returnPushTaskQueue(dataPusher.getAndResetIdleQueue());
+    // k mapperEnd 内部再等待所有 in-flight push，然后向 Driver 内 LifecycleManager 汇报。
+    // k 最后一个 mapId 完成时，LifecycleManager 会触发 StageEnd/CommitFiles。
     shuffleClient.mapperEnd(
         shuffleId,
         mapId,
@@ -416,6 +432,7 @@ public class HashBasedShuffleWriter<K, V, C> extends ShuffleWriter<K, V> {
     writeMetrics.incWriteTime(System.nanoTime() - waitStartTime);
 
     BlockManagerId bmId = SparkEnv.get().blockManager().shuffleServerId();
+    // k MapStatus 保留 Spark 的 map-output/大小记账；真实 Worker PartitionLocation 保存在 Celeborn。
     mapStatus =
         SparkUtils.createMapStatus(
             bmId, SparkUtils.unwrap(mapStatusLengths), taskContext.taskAttemptId());

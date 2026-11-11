@@ -103,6 +103,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
   override def receive(client: TransportClient, msg: RequestMessage): Unit =
     msg match {
       case pushData: PushData =>
+        // k Worker pushPort 的 Netty 入口；REDUCE shuffle 会进入 handlePushData。
         workerSource.recordAppActiveConnection(client, pushData.shuffleKey)
         val callback = new SimpleRpcResponseCallback(
           client,
@@ -179,6 +180,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       }
 
     // find FileWriter responsible for the data
+    // k 使用 shuffleKey + partitionUniqueId 找 reserveSlots 阶段建立的 WorkingPartition。
     val location =
       if (isPrimary) {
         partitionLocationInfo.getPrimaryLocation(shuffleKey, pushData.partitionUniqueId)
@@ -232,11 +234,13 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
     // During worker shutdown, worker will return HARD_SPLIT for all existed partition.
     // This should before return exception to make current push data can revive and retry.
     if (shutdown.get()) {
+      // k 受控下线不直接报写失败，而以 HARD_SPLIT 让客户端 revive：旧 epoch 封口，未接收 batch 重发到新 epoch。
       logInfo(s"Push data return HARD_SPLIT for shuffle $shuffleKey since worker shutdown.")
       callbackWithTimer.onSuccess(ByteBuffer.wrap(Array[Byte](StatusCode.HARD_SPLIT.getValue)))
       return
     }
 
+    // k WorkingPartition 把 PartitionLocation 与实际 PartitionDataWriter 绑在一起。
     val fileWriter = location.asInstanceOf[WorkingPartition].getFileWriter
     val exception = fileWriter.getException
     if (exception != null) {
@@ -263,6 +267,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       softSplit = true
     }
 
+    // k close/commit 会等 pendingWrites 归零，所以先登记这次未完成的 write。
     fileWriter.incrementPendingWrites()
 
     if (fileWriter.isClosed) {
@@ -387,6 +392,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
           }
         }
       })
+      // k primary 本地写与 replica push 并行；响应 client 前会合并两边结果。
       writeLocalData(Seq(fileWriter), body, shuffleKey, isPrimary, None, writePromise)
     } else {
       // The codes here could be executed if
@@ -396,6 +402,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
       // will fast stop pushing data to the worker, we won't return congest status. But
       // in the long term, especially if this issue could frequently happen, we may need to return
       // congest&softSplit status together
+      // k 无需发 replica 时，只把 batch 交给本地 PartitionDataWriter。
       writeLocalData(Seq(fileWriter), body, shuffleKey, isPrimary, None, writePromise)
       Try(Await.result(writePromise.future, Duration.Inf)) match {
         case Success(result) =>
@@ -1537,6 +1544,7 @@ class PushDataHandler(val workerSource: WorkerSource) extends BaseMessageHandler
         shuffleKey: String,
         index: Int): Unit = {
       try {
+        // k 这一行只写入当前 storage tier；LocalTierWriter 通常先接管到 flushBuffer。
         fileWriter.write(body)
         result(index) = StatusCode.SUCCESS
       } catch {

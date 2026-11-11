@@ -341,6 +341,7 @@ class CommitManager(appUniqueId: String, val conf: CelebornConf, lifecycleManage
   class ShutdownWorkerListener extends WorkerStatusListener {
 
     override def notifyChangedWorkersStatus(workersStatus: WorkersStatus): Unit = {
+      // k 主动下线会在 Worker 真正停服前封口其旧 epoch；异常 lost/unknown 没有这段预提交窗口。
       if (workersStatus.shutdownWorkers != null) {
         lifecycleManager.shuffleAllocatedWorkers.asScala.foreach {
           case (shuffleId, workerIdToPartitionLocationInfos) =>
@@ -359,6 +360,7 @@ class CommitManager(appUniqueId: String, val conf: CelebornConf, lifecycleManage
                 }
               }
               shuffleCommittedInfo.synchronized {
+                // k batch commit 调度器随后向仍存活的 Worker 发 CommitFiles，推动 Graceful 的 location 排空。
                 shuffleCommittedInfo.unhandledPartitionLocations.addAll(
                   needCommitPartitionLocations)
               }

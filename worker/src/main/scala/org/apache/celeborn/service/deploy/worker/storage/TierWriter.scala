@@ -77,6 +77,7 @@ abstract class TierWriterBase(
     }
 
     flushLock.synchronized {
+      // k metaHandler 在写入前更新 partition-type-specific 元数据；REDUCE range read 会在这里提取 mapId。
       metaHandler.beforeWrite(buf)
       ensureNotClosed()
       writeInternal(buf)
@@ -132,10 +133,13 @@ abstract class TierWriterBase(
     ensureNotClosed()
     var closeStreamsError: IOException = null
     try {
+      // k 先等 PushDataHandler 已登记的 write 全部结束，再禁止新写入。
       waitOnNoPending(numPendingWrites, false)
       closed = true
+      // k 把最后未达阈值的 flushBuffer 也提交给 Flusher。
       finalFlush()
       metaHandler.afterClose()
+      // k 等所有 FlushTask 完成后才关闭底层 stream/channel。
       waitOnNoPending(notifier.numPendingFlushes, true)
     } finally {
       returnBuffer(false)
@@ -237,6 +241,7 @@ abstract class TierWriterBase(
       // task won't be null in real workloads unless it is a memory file
       // task will be null in UT to check chunk size and offset
       if (flushTask != null) {
+        // k 只把 FlushTask 放入 Flusher 队列，这一行不同步等待 FileChannel.write。
         addFlushTask(flushTask)
         flushBuffer = null
         if (!rebuildChunkOffsets) {
@@ -462,9 +467,13 @@ class LocalTierWriter(
     if (userCongestionControlContext != null)
       userCongestionControlContext.updateProduceBytes(numBytes)
     val flushBufferReadableBytes = flushBuffer.readableBytes
+    // k 加入当前 buf 会超阈值时，先把已有 flushBuffer 交给 Flusher。
     if (flushBufferReadableBytes != 0 && flushBufferReadableBytes + numBytes >= flusherBufferSize) {
       flush(false)
     }
+    // k ByteBuf 引用计数 + 1
+    // k Add ByteBuf to CompositeByteBuf.  buf Ownership 之后被 CompositeByteBuf 管理.
+    // k （以上两步现已抽取到 appendToFlushBuffer。）
     appendToFlushBuffer(buf)
   }
 

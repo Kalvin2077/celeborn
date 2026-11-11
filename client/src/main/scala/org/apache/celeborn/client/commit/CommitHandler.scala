@@ -311,6 +311,7 @@ abstract class CommitHandler(
       !CollectionUtils.isEmpty(param.primaryIds) ||
         !CollectionUtils.isEmpty(param.replicaIds)) map { param =>
       Future {
+        // k 每个 Worker 收到自己需要封口的 primary/replica uniqueIds 和最终 mapperAttempts。
         val msg = CommitFiles(
           appUniqueId,
           shuffleId,
@@ -609,6 +610,7 @@ abstract class CommitHandler(
       primaryPartMap: ConcurrentHashMap[String, PartitionLocation],
       replicaPartMap: ConcurrentHashMap[String, PartitionLocation],
       isSegmentGranularityVisible: Boolean = false): Unit = {
+    // k 用 Worker 返回的 StorageInfo 补全已 commit 的 PartitionLocation。
     val committedPartitions = new util.HashMap[String, PartitionLocation]
     primaryPartitionUniqueIds.asScala.foreach { id =>
       val partitionLocation = primaryPartMap.get(id)
@@ -626,6 +628,7 @@ abstract class CommitHandler(
         primaryPartition.setPeer(replicaPartition)
         replicaPartition.setPeer(primaryPartition)
       } else {
+        // k primary 随 Worker 丢失但 replica 已 commit 时，直接把 replica 发布为 reducer 的读取位置。
         logInfo(s"Shuffle $shuffleId partition $id: primary lost, " +
           s"use replica $replicaPartition.")
         replicaPartition.setMapIdBitMap(shuffleCommittedInfo.committedMapIdBitmap.get(id))
@@ -635,6 +638,7 @@ abstract class CommitHandler(
 
     // TODO: if support upstream task write and downstream task read simultaneously,
     //  should record the partition locations information in upstream task start time, rather than end time.
+    // k reducerFileGroupsMap: shuffleId -> reduce partitionId -> 一个或多个 epoch/file location。
     committedPartitions.values().asScala.foreach { partition =>
       val partitionLocations = reducerFileGroupsMap.get(shuffleId).computeIfAbsent(
         partition.getId,
@@ -648,6 +652,7 @@ abstract class CommitHandler(
       failedPrimaries: util.Map[String, WorkerInfo],
       failedReplicas: util.Map[String, WorkerInfo]): Boolean = {
     val shuffleKey = Utils.makeShuffleKey(appUniqueId, shuffleId)
+    // k 无副本时任一 primary commit 失败即丢数据；有副本时同一 uniqueId 的两份都失败才判丢。
     if (!pushReplicateEnabled && failedPrimaries.size() != 0) {
       val msg =
         failedPrimaries.asScala.map {

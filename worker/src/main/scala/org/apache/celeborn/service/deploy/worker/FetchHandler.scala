@@ -141,6 +141,7 @@ class FetchHandler(
           isLegacy = false,
           openStream.getReadLocalShuffle,
           callback)
+      // k BATCH_OPEN_STREAM 入口：一个 Executor RPC 批量打开同一 Worker 上的多个 commit 文件。
       case openStreamList: PbOpenStreamList =>
         val shuffleKey = openStreamList.getShuffleKey()
         val files = openStreamList.getFileNameList
@@ -156,6 +157,7 @@ class FetchHandler(
         workerSource.startTimer(WorkerSource.OPEN_STREAM_TIME, openStreamRequestId)
         try {
           0 until files.size() foreach { idx =>
+            // k 每个文件分别注册 stream，返回与请求顺序对应的 StreamHandler。
             val pbStreamHandlerOpt = handleReduceOpenStreamInternal(
               client,
               shuffleKey,
@@ -172,6 +174,7 @@ class FetchHandler(
           workerSource.stopTimer(WorkerSource.OPEN_STREAM_TIME, openStreamRequestId)
         }
 
+        // k 响应只包含各文件的 streamId/numChunks，不在建流阶段发送 shuffle payload。
         client.getChannel.writeAndFlush(new RpcResponse(
           rpcRequest.requestId,
           new NioManagedBuffer(new TransportMessage(
@@ -256,11 +259,13 @@ class FetchHandler(
       startIndex: Int,
       endIndex: Int,
       readLocalShuffle: Boolean = false): PbStreamHandlerOpt = {
+    // k 这里没有 worker.shutdown 判断：Graceful/Decommission 排空期间，进程存活就继续服务旧 committed 文件。
     try {
       logDebug(s"Received open stream request $shuffleKey $fileName $startIndex " +
         s"$endIndex get file name $fileName from client channel " +
         s"${NettyUtils.getRemoteAddress(client.getChannel)}")
 
+      // k 用 shuffleKey + fileName 找到 CommitFiles 发布后的 FileInfo。
       var fileInfo = getRawFileInfo(shuffleKey, fileName)
       val streamId = chunkStreamManager.nextStreamId()
       // we must get sorted fileInfo for the following cases.
@@ -308,6 +313,7 @@ class FetchHandler(
               fileName)
             makeStreamHandler(streamId, numChunks = 0)
           case _ =>
+            // k 本地盘封装为 FileChunkBuffers，内存层封装为 MemoryChunkBuffers。
             val managedBuffer = fileInfo match {
               case df: DiskFileInfo =>
                 new FileChunkBuffers(df, transportConf)
@@ -321,6 +327,7 @@ class FetchHandler(
                 case _ =>
                   null
               }
+            // k streamId -> chunk buffers 注册到 Worker；后续 ChunkFetchRequest 才按索引取数据。
             chunkStreamManager.registerStream(
               streamId,
               shuffleKey,
@@ -335,6 +342,7 @@ class FetchHandler(
               s"StreamId $streamId, fileName $fileName, numChunks ${meta.getNumChunks}, " +
                 s"mapRange [$startIndex-$endIndex]. Received from client channel " +
                 s"${NettyUtils.getRemoteAddress(client.getChannel)}")
+            // k 返回 numChunks 让客户端确定 chunkIndex 范围。
             makeStreamHandler(
               streamId,
               meta.getNumChunks)
@@ -489,6 +497,7 @@ class FetchHandler(
       streamType: StreamType): Unit = {
     streamType match {
       case StreamType.ChunkStream =>
+        // k 客户端读完/关闭后移除 stream state，并减少该文件的活跃 stream 引用。
         val streamState = chunkStreamManager.removeStreamState(streamId)
         if (streamState != null) {
           val (shuffleKey, fileName) = (streamState.shuffleKey, streamState.fileName)
@@ -556,6 +565,7 @@ class FetchHandler(
     logDebug(s"Received req from ${remoteAddr}" +
       s" to fetch block $streamChunkSlice")
 
+    // k streamId 找到建流时注册的文件/内存 chunk buffers。
     val streamState = chunkStreamManager.getStreamState(streamChunkSlice.streamId)
     if (streamState == null) {
       val message = s"Stream ${streamChunkSlice.streamId} is not registered with worker. " +
@@ -596,12 +606,14 @@ class FetchHandler(
     val fetchTimeMetric = chunkStreamManager.getFetchTimeMetric(streamChunkSlice.streamId)
     val fetchBeginTime = System.nanoTime()
     try {
+      // k 按 chunkIndex（以及可选 slice）取得实际 ManagedBuffer。
       val buf = chunkStreamManager.getChunk(
         streamChunkSlice.streamId,
         streamChunkSlice.chunkIndex,
         streamChunkSlice.offset,
         streamChunkSlice.len)
       chunkStreamManager.chunkBeingSent(streamChunkSlice.streamId)
+      // k 这里才把 shuffle payload 作为 ChunkFetchSuccess 发回 Executor。
       client.getChannel.writeAndFlush(new ChunkFetchSuccess(streamChunkSlice, buf))
         .addListener(new GenericFutureListener[Future[_ >: Void]] {
           override def operationComplete(future: Future[_ >: Void]): Unit = {

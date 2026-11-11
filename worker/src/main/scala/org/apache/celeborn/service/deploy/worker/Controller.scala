@@ -184,6 +184,7 @@ private[deploy] class Controller(
       isSegmentGranularityVisible: Boolean): Unit = {
     val shuffleKey = Utils.makeShuffleKey(applicationId, shuffleId)
     if (shutdown.get()) {
+      // k 所有受控下线模式先置 shutdown，阻止该 Worker 再为新 partition 创建 writer。
       val msg = "Current worker is shutting down!"
       logError(s"[handleReserveSlots] $msg")
       workerSource.incCounter(WorkerSource.RESERVE_SLOTS_FAIL_COUNT)
@@ -341,6 +342,7 @@ private[deploy] class Controller(
         }
       if (location == null) {
         location = requestLoc
+        // k reserveSlots 在 Worker 上为每个 PartitionLocation 创建 PartitionDataWriter。
         val writer = storageManager.createPartitionDataWriter(
           applicationId,
           shuffleId,
@@ -406,6 +408,7 @@ private[deploy] class Controller(
 
                 val fileWriter = location.asInstanceOf[WorkingPartition].getFileWriter
                 waitMapPartitionRegionFinished(fileWriter, shuffleCommitTimeout)
+                // k CommitFiles 的核心屏障：close 会 finalFlush，等 pending write/flush，然后封口文件。
                 val bytes = fileWriter.close()
                 if (bytes > 0L) {
                   logDebug(

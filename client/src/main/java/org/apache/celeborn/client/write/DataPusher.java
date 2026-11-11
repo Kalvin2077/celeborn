@@ -38,14 +38,17 @@ import org.apache.celeborn.common.util.ThreadUtils;
 import org.apache.celeborn.common.util.Utils;
 import org.apache.celeborn.common.write.PushState;
 
+// k 把 writer 线程的 buffer 生产与 ShuffleClient 网络 push 解耦。
 public class DataPusher {
   private static final Logger logger = LoggerFactory.getLogger(DataPusher.class);
 
   private final long WAIT_TIME_NANOS = TimeUnit.MILLISECONDS.toNanos(500);
 
+  // k idleQueue 保存可复用的空 PushTask/buffer。
   private LinkedBlockingQueue<PushTask> idleQueue;
-  // partition -> PushTask Queue
   private final PushState pushState;
+  // partition -> PushTask Queue
+  // k dataPushQueue 保存 writer 已组装好、等待发送的 PushTask。
   private final DataPushQueue dataPushQueue;
   private final ReentrantLock idleLock = new ReentrantLock();
   private final Condition idleFull = idleLock.newCondition();
@@ -126,9 +129,11 @@ public class DataPusher {
               public void run() {
                 while (stillRunning()) {
                   try {
+                    // k 后台线程从 dataPushQueue 取待发任务。
                     ArrayList<PushTask> tasks = dataPushQueue.takePushTasks();
                     for (int i = 0; i < tasks.size(); i++) {
                       PushTask task = tasks.get(i);
+                      // k 调用 ShuffleClient 后，再把 PushTask/buffer 归还 idleQueue 复用。
                       pushData(task);
                       reclaimTask(task);
                     }
@@ -169,6 +174,7 @@ public class DataPusher {
 
   private byte[] addTask(int partitionId, byte[] buffer, int size, boolean swapBuffer)
       throws IOException, InterruptedException {
+    // k 在 writer 线程中先记录这个 batch 的 CRC，避免可复用 buffer 被后续改写。
     client.computeBatchCRC(shuffleId, mapId, attemptId, partitionId, buffer, 0, size);
     try {
       PushTask task = null;
@@ -188,9 +194,11 @@ public class DataPusher {
         task.setSize(size);
       } else {
         task.setSize(size);
+        // k 复制有效字节后即可重用 writer 的原 sendBuffer。
         System.arraycopy(buffer, 0, task.getBuffer(), 0, size);
       }
       task.setPartitionId(partitionId);
+      // k 入队后由 pushThread 异步发送。
       while (!dataPushQueue.addPushTask(task)) {
         checkException();
       }
@@ -240,6 +248,7 @@ public class DataPusher {
   protected void pushData(PushTask task) throws IOException {
     // CRC was already recorded in addTask() on the writer thread before the buffer was enqueued.
     // Use the bare pushData here to avoid double-counting the same batch into CommitMetadata.
+    // k 进入 ShuffleClientImpl.pushOrMergeData：首次 push 会先懒注册 shuffle 并取 PartitionLocation。
     int bytesWritten =
         client.pushData(
             shuffleId,

@@ -83,13 +83,17 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
   // k 真正分配 Slot 时，Master 使用的也是 availableWorkers，而不是注册表
   public final Set<WorkerInfo> availableWorkers = ConcurrentHashMap.newKeySet();
 
+  // k 已从 workersMap 删除的失联节点及失联时间，仅用于保留不可用信息。
   public final ConcurrentHashMap<WorkerInfo, Long> lostWorkers = JavaUtils.newConcurrentHashMap();
+  // k Master REST 写入的待执行事件；Worker 通过下一次心跳响应领取。
   public final ConcurrentHashMap<WorkerInfo, WorkerEventInfo> workerEventInfos =
       JavaUtils.newConcurrentHashMap();
   public final ConcurrentHashMap<String, Long> appHeartbeatTime = JavaUtils.newConcurrentHashMap();
   public final Set<WorkerInfo> excludedWorkers = ConcurrentHashMap.newKeySet();
   public final Set<WorkerInfo> manuallyExcludedWorkers = ConcurrentHashMap.newKeySet();
+  // k Graceful 重启中的 Worker：仍在 workersMap，但不能再参与新 slot 分配。
   public final Set<WorkerInfo> shutdownWorkers = ConcurrentHashMap.newKeySet();
+  // k 永久缩容排空中的 Worker：仍在 workersMap，但不能再参与新 slot 分配。
   public final Set<WorkerInfo> decommissionWorkers = ConcurrentHashMap.newKeySet();
   public final Set<WorkerInfo> workerLostEvents = ConcurrentHashMap.newKeySet();
 
@@ -277,6 +281,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
     workerLostEvents.add(worker);
     // remove worker from workers
     synchronized (workersMap) {
+      // k Lost 只改集群成员状态；Master 没有 partition -> file 元数据，因此这里不存在数据迁移。
       workersMap.remove(worker.toUniqueId());
       workerStats.remove(worker);
       lostWorkers.put(worker, System.currentTimeMillis());
@@ -393,6 +398,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
     }
 
     // try to update the available workers if the worker status is Normal
+    // k 首次注册已经可分配；后续心跳再按磁盘、负载和 Worker 状态校正 availableWorkers。
     if (workerStatus.getState() == PbWorkerStatus.State.Normal) {
       updateAvailableWorkers(worker);
     }
@@ -428,6 +434,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
     workerInfo.updateDiskSlots(estimatedPartitionSize);
     // k 注册 worker 到 master
     synchronized (workersMap) {
+      // k 新 Worker 在本次元数据更新内就进入可分配集合；注册动作不重平衡任何旧 shuffle。
       workersMap.putIfAbsent(workerInfo.toUniqueId(), workerInfo);
       workerStats.put(workerInfo, new AtomicReference<>());
       shutdownWorkers.remove(workerInfo);
@@ -628,6 +635,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
 
   public void updateMetaByReportWorkerUnavailable(List<WorkerInfo> failedWorkers) {
     synchronized (this.workersMap) {
+      // k Graceful 只停止未来分配，保留注册关系，给旧 location 留出 commit/read 与同地址恢复窗口。
       shutdownWorkers.addAll(failedWorkers);
       availableWorkers.removeAll(failedWorkers);
     }
@@ -646,6 +654,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
             workerEventInfos.remove(workerInfo);
             updateAvailableWorkers(workerInfo);
           } else {
+            // k 收到 Master 管理事件便先摘出候选池；不必等待 Worker 下一次心跳真正开始排空。
             workerEventInfos.put(workerInfo, new WorkerEventInfo(eventType.getNumber(), eventTime));
             availableWorkers.remove(workerInfo);
           }
@@ -656,6 +665,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
 
   public void updateMetaByReportWorkerDecommission(List<WorkerInfo> workers) {
     synchronized (this.workersMap) {
+      // k Decommission 的 Master 侧动作也只是停止新分配；旧数据由 Worker 等待 shuffle 过期后清理。
       decommissionWorkers.addAll(workers);
       availableWorkers.removeAll(workers);
     }
@@ -695,6 +705,7 @@ public abstract class AbstractMetaManager implements IMetadataHandler {
   }
 
   private boolean isWorkerAvailable(WorkerInfo workerInfo) {
+    // k “在册”不等于“可分配”：只有 Normal 且无事件/排除/Graceful 标记的 Worker 才进入候选池。
     return (workerInfo.getWorkerStatus().getState() == PbWorkerStatus.State.Normal
             && !workerEventInfos.containsKey(workerInfo))
         && !excludedWorkers.contains(workerInfo)

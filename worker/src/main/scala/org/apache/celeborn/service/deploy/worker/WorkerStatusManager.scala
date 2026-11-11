@@ -37,6 +37,7 @@ private[celeborn] class WorkerStatusManager(conf: CelebornConf) extends Logging 
   // Written under this manager's monitor but read without it, for example by the /healthz
   // endpoint on an HTTP thread, so it is published volatile.
   @volatile var currentWorkerStatus = WorkerStatus.normalWorkerStatus()
+  // k 普通 SIGTERM 默认立即退出；开启 worker.graceful.shutdown.enabled 后才默认走 Graceful。
   var exitEventType = WorkerEventType.Immediately
   private var worker: Worker = _
   private var shutdown: AtomicBoolean = _
@@ -77,6 +78,7 @@ private[celeborn] class WorkerStatusManager(conf: CelebornConf) extends Logging 
   }
 
   def doTransition(eventType: WorkerEventType): Unit = this.synchronized {
+    // k 该事件既可由 Worker REST 直接触发，也可由 Master 先记账、再随 Worker 心跳响应下发。
     if (inExitStatus()) {
       logDebug(s"Worker receive event: $eventType, but in exit State: ${getWorkerState()} ")
     } else {
@@ -116,6 +118,7 @@ private[celeborn] class WorkerStatusManager(conf: CelebornConf) extends Logging 
 
     // Compatible with current exit logic
     // trigger shutdown hook to exit
+    // k 这里只选择目标状态；10 秒后 System.exit 才进入 Worker 的 shutdown hook 执行具体下线逻辑。
     ThreadUtils.newThread(
       new Runnable {
         override def run(): Unit = {
@@ -141,11 +144,13 @@ private[celeborn] class WorkerStatusManager(conf: CelebornConf) extends Logging 
   }
 
   private def recommissionWorker(): Unit = this.synchronized {
+    // k Idle/InDecommissionThenIdle 可原地恢复为 Normal，不需要退出再启动。
     shutdown.set(false)
     transitionState(State.Normal)
   }
 
   private def decommissionWorkerThenIdle(): Unit = this.synchronized {
+    // k DecommissionThenIdle 排空 shuffle 后留在 Idle，不退出进程；Recommission 可重新加入可分配集合。
     shutdown.set(true)
     transitionState(State.InDecommissionThenIdle)
     worker.sendWorkerDecommissionToMaster()

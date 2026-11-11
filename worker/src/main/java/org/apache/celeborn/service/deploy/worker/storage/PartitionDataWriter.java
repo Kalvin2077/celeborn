@@ -91,6 +91,7 @@ public class PartitionDataWriter implements DeviceObserver {
 
     writerContext.setPartitionDataWriter(this);
     writerContext.setDeviceMonitor(deviceMonitor);
+    // k reserveSlots 时由 StoragePolicy 选择 Memory/Local/DFS tier 并创建真正 writer。
     currentTierWriter =
         storageManager.storagePolicy().createFileWriter(writerContext, numPendingWrites, notifier);
   }
@@ -149,6 +150,7 @@ public class PartitionDataWriter implements DeviceObserver {
     if (currentTierWriter.needEvict()) {
       evict(false);
     }
+    // k PartitionDataWriter 是稳定外层，实际写入委托给当前 TierWriter。
     currentTierWriter.write(data);
   }
 
@@ -218,6 +220,7 @@ public class PartitionDataWriter implements DeviceObserver {
   }
 
   public synchronized long close() {
+    // k CommitFiles 调用这里，由 TierWriter.close 执行 finalFlush 并等待异步 flush。
     long length = currentTierWriter.close();
     source.updateHistogram(WorkerSource.PARTITION_FILE_SIZE(), length);
     return length;

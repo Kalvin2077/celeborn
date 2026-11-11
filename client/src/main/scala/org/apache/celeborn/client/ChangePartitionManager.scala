@@ -296,7 +296,10 @@ class ChangePartitionManager(
       }
     }
 
+    // k 默认 revive 只在该 shuffle 原有 workerSnapshots 中选新位置；集群扩容不会主动改写旧 shuffle。
+    // k 开启 dynamicResource 后，也仅在 ChangePartition 且旧候选不足/不可用比例过高时重新向 Master 要 Worker。
     val candidates = collectCandidateWorkers(shuffleId)
+    // k （以上逻辑现封装在 collectCandidateWorkers 中。）
 
     if (candidates.size < 1 || (pushReplicateEnabled && candidates.size < 2)) {
       logError("[Update partition] failed for not enough candidates for revive.")
@@ -332,6 +335,7 @@ class ChangePartitionManager(
           })
         partitionLocationInfo.addPrimaryPartitions(primaryLocations)
         partitionLocationInfo.addReplicaPartitions(replicaLocations)
+        // k 这里只为失败/分裂 partition 创建更高 epoch；旧 epoch 文件不搬迁，最终 read 会看到多个 epoch。
         lifecycleManager.updateLatestPartitionLocations(shuffleId, primaryLocations)
 
         // partition location can be null when call reserveSlotsWithRetry().

@@ -39,6 +39,7 @@ class WorkerStatusTracker(
   private val workerStatusListeners = ConcurrentHashMap.newKeySet[WorkerStatusListener]()
 
   val excludedWorkers = new ShuffleFailedWorkers()
+  // k shuttingWorkers 合并 Master 返回的 Graceful + Decommission 节点，触发旧 location 提前 commit。
   val shuttingWorkers: JSet[WorkerInfo] = ConcurrentHashMap.newKeySet[WorkerInfo]()
 
   // These workers already have client-local RPC endpoints and can reserve slots directly.
@@ -61,6 +62,7 @@ class WorkerStatusTracker(
   }
 
   def getNeedCheckedWorkers(): Set[WorkerInfo] = {
+    // k 默认只向 Master 核验本地已失败/下线的 Worker；开启配置后才核验本应用全部 allocatedWorkers。
     if (conf.clientCheckedUseAllocatedWorkers) {
       lifecycleManager.getAllocatedWorkers()
     } else {
@@ -199,6 +201,7 @@ class WorkerStatusTracker(
         }
       }
       for (worker <- res.unknownWorkers.asScala) {
+        // k unknown 表示该 Worker 已不在 Master workersMap；它不同于仍在册但停止新分配的 shutting。
         if (!excludedWorkers.containsKey(worker) || excludedWorkers.get(
             worker)._1 != StatusCode.WORKER_UNKNOWN) {
           excludedWorkers.put(worker, (StatusCode.WORKER_UNKNOWN, current))
@@ -214,6 +217,7 @@ class WorkerStatusTracker(
       // Always trigger commit files for shutting down workers from HeartbeatFromApplicationResponse
       // See details in CELEBORN-696
       if (!res.unknownWorkers.isEmpty || !res.shuttingWorkers.isEmpty) {
+        // k listener 会把 shutting Worker 上尚未处理的 partition location 放入提前 CommitFiles 队列。
         val workerStatus = new WorkersStatus(res.unknownWorkers, res.shuttingWorkers)
         workerStatusListeners.asScala.foreach { listener =>
           try {

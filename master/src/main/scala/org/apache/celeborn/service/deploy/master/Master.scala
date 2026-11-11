@@ -347,6 +347,7 @@ private[celeborn] class Master(
         "send-application-meta")
     }
 
+    // k 异常下线不是由连接断开判定；Master 按 workerHeartbeatTimeout 周期扫描最后心跳。
     checkForWorkerTimeoutTask = scheduleCheckTask(workerHeartbeatTimeoutMs, pbCheckForWorkerTimeout)
     checkForApplicationTimeOutTask =
       scheduleCheckTask(appHeartbeatTimeoutMs / 2, CheckForApplicationTimeOut)
@@ -412,6 +413,7 @@ private[celeborn] class Master(
 
   override def onDisconnected(address: RpcAddress): Unit = {
     // The disconnected client could've been either a worker or an app; remove whichever it was
+    // k RPC 连接断开不等于 Worker 下线；成员删除只由显式 WorkerLost 或心跳超时触发。
     logDebug(s"Client $address got disassociated.")
   }
 
@@ -710,6 +712,7 @@ private[celeborn] class Master(
     statusSystem.workersMap.values().asScala.foreach { worker =>
       if (worker.lastHeartbeat < currentTime - workerHeartbeatTimeoutMs
         && !statusSystem.workerLostEvents.contains(worker)) {
+        // k 超时只触发 WorkerLost 元数据清理，不迁移该 Worker 上已有的 partition/file。
         logWarning(s"Worker ${worker.readableAddress()} timeout! Trigger WorkerLost event.")
         // trigger WorkerLost event
         self.send(WorkerLost(
@@ -766,6 +769,8 @@ private[celeborn] class Master(
       workerStatus: WorkerStatus,
       workerStats: Option[WorkerStats],
       requestId: String): Unit = {
+    // k workersMap 是 Master 对“已注册”的判断；未知但仍存活的 Worker 会据此自行重注册。
+    // k （targetWorker 现在由 handleHeartbeatFromWorker 的参数传入，不再在这里构造。）
     val registered = statusSystem.workersMap.containsKey(targetWorker.toUniqueId)
     if (!registered) {
       logWarning(s"Received heartbeat from unknown worker ${targetWorker.toUniqueId}.")
@@ -800,6 +805,7 @@ private[celeborn] class Master(
       Seq(s"worker=${targetWorker.toUniqueId}"))
 
     val workerEventInfo = statusSystem.workerEventInfos.get(targetWorker)
+    // k Master 只保存待执行事件；真正的 Worker 状态切换通过心跳响应交给 WorkerStatusManager。
     if (workerEventInfo == null) {
       context.reply(HeartbeatFromWorkerResponse(
         expiredShuffleKeys,
@@ -867,6 +873,7 @@ private[celeborn] class Master(
       logWarning(s"Unknown worker $host:$rpcPort:$pushPort:$fetchPort:$replicatePort" +
         s" for WorkerLost handler!")
     } else {
+      // k WorkerLost 从注册/可分配集合摘除节点，但不会改写各 LifecycleManager 保存的 PartitionLocation。
       statusSystem.handleWorkerLost(host, rpcPort, pushPort, fetchPort, replicatePort, requestId)
     }
     if (context != null) {
@@ -939,6 +946,7 @@ private[celeborn] class Master(
         requestId)
       context.reply(RegisterWorkerResponse(true, "Worker in workerLostEvents, re-register."))
     } else {
+      // k RegisterWorker 提交后即更新 workersMap/availableWorkers；不必等第一次 Worker 心跳。
       statusSystem.handleRegisterWorker(
         host,
         rpcPort,
@@ -972,6 +980,7 @@ private[celeborn] class Master(
   }
 
   def handleRequestSlots(context: RpcCallContext, requestSlots: RequestSlots): Unit = {
+    // k RegisterShuffle 控制链到 Master 的入口：为每个 reduce partition 选择 primary/可选 replica Worker。
     val numReducers = requestSlots.partitionIdList.size()
     val shuffleKey = Utils.makeShuffleKey(requestSlots.applicationId, requestSlots.shuffleId)
 
@@ -993,12 +1002,14 @@ private[celeborn] class Master(
       return
     }
 
+    // k 先根据副本要求、上限和当前可用 Worker 数确定候选 Worker 集合大小（现已抽取为 selectWorkers）。
     val selectedWorkers = selectWorkers(
       availableWorkers,
       requestSlots.maxWorkers,
       slotsAssignMaxWorkers,
       requestSlots.shouldReplicate)
     // offer slots
+    // k allocator 按 LOAD_AWARE 或 ROUND_ROBIN 生成 WorkerResource：Worker -> (primary, replica)。
     val slots =
       masterSource.sample(MasterSource.OFFER_SLOTS_TIME, s"offerSlots-${Random.nextInt()}") {
         statusSystem.workersMap.synchronized {
@@ -1033,6 +1044,7 @@ private[celeborn] class Master(
     }
 
     // register shuffle success, update status
+    // k Master 只登记这次 slot 分配；实际 PartitionDataWriter 要由 LifecycleManager 随后向 Worker reserve。
     statusSystem.handleRequestSlots(
       shuffleKey,
       requestSlots.hostname,
@@ -1074,6 +1086,7 @@ private[celeborn] class Master(
     if (authEnabled) {
       pushApplicationMetaToWorkers(requestSlots.applicationId, slots.keySet())
     }
+    // k 把候选 PartitionLocations 返回 Driver LifecycleManager，后者再逐 Worker 执行 ReserveSlots。
     context.reply(RequestSlotsResponse(
       StatusCode.SUCCESS,
       slots.asInstanceOf[WorkerResource],
@@ -1230,6 +1243,7 @@ private[celeborn] class Master(
       requestId: String): Unit = {
     logInfo(s"Receive ReportNodeFailure $failedWorkers, current excluded workers" +
       s"${statusSystem.excludedWorkers}")
+    // k Graceful：加入 shutdownWorkers 并停止新 slot；Worker 仍在册，以便提交和读取旧文件。
     statusSystem.handleReportWorkerUnavailable(failedWorkers, requestId)
     context.reply(OneWayMessageResponse)
   }
@@ -1240,6 +1254,7 @@ private[celeborn] class Master(
       requestId: String): Unit = {
     logInfo(s"Receive ReportWorkerDecommission $workers, current decommission workers" +
       s"${statusSystem.excludedWorkers}")
+    // k Decommission：加入 decommissionWorkers 并停止新 slot；等 Worker 自己排空旧 shuffle。
     statusSystem.handleReportWorkerDecommission(workers, requestId)
     context.reply(OneWayMessageResponse)
   }
@@ -1370,6 +1385,7 @@ private[celeborn] class Master(
         new util.ArrayList(
           (statusSystem.excludedWorkers.asScala ++ statusSystem.manuallyExcludedWorkers.asScala).asJava),
         unknownWorkers,
+        // k Driver 通过应用心跳得知 Graceful/Decommission Worker，并可在其退出前提前 CommitFiles。
         new util.ArrayList[WorkerInfo](
           (statusSystem.shutdownWorkers.asScala ++ statusSystem.decommissionWorkers.asScala).asJava),
         new util.ArrayList(appRelatedShuffles),
@@ -1408,12 +1424,14 @@ private[celeborn] class Master(
       workerEventTypeValue: Int,
       workers: util.List[WorkerInfo],
       context: RpcCallContext): Unit = {
+    // k 先在 Master 记事件并立即移出 availableWorkers；Worker 下一轮心跳才领取并执行事件。
     statusSystem.handleWorkerEvent(workerEventTypeValue, workers, requestId)
     context.reply(PbWorkerEventResponse.newBuilder().setSuccess(true).build())
   }
 
   private def workersAvailable(
       tmpExcludedWorkerList: Set[WorkerInfo] = Set.empty): util.List[WorkerInfo] = {
+    // k 扩容只扩大后续 RequestSlots 的候选池；这里不会遍历或重平衡已分配的 shuffle。
     if (tmpExcludedWorkerList.isEmpty) {
       new util.ArrayList[WorkerInfo](statusSystem.availableWorkers)
     } else {

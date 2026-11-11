@@ -187,8 +187,11 @@ public class SparkShuffleManager implements ShuffleManager {
     // need to ensure that LifecycleManager will only be created once. Parallelism needs to be
     // considered in this place, because if there is one RDD that depends on multiple RDDs
     // at the same time, it may bring parallel `register shuffle`, such as Join in Sql.
+    // k 单例
     if (isDriver && lifecycleManager == null) {
+      // k 多线程防重复新建
       synchronized (this) {
+        // k 多线程双检
         if (lifecycleManager == null) {
           appUniqueId = celebornConf.appUniqueIdWithUUIDSuffix(appId);
           lifecycleManager = new LifecycleManager(appUniqueId, celebornConf);
@@ -269,6 +272,7 @@ public class SparkShuffleManager implements ShuffleManager {
     // is the same SparkContext among different shuffleIds.
     // This method may be called many times.
     String appId = SparkUtils.appUniqueId(dependency.rdd().context());
+    // k Driver 为整个 Spark application 懒创建一个 LifecycleManager；这里还没有向 Celeborn 注册具体 shuffle。
     initializeLifecycleManager(appId);
 
     lifecycleManager.shuffleCount().increment();
@@ -285,6 +289,7 @@ public class SparkShuffleManager implements ShuffleManager {
         logger.warn("Fallback to vanilla Spark SortShuffleManager for shuffle: {}", shuffleId);
       }
       sortShuffleIds.add(shuffleId);
+      // k fallback 返回 Spark SortShuffleManager 的 handle，后续 writer/reader 也会走 Spark 原生路径。
       return sortShuffleManager().registerShuffle(shuffleId, dependency);
     } else {
       lifecycleManager.registerAppShuffleDeterminate(
@@ -292,6 +297,7 @@ public class SparkShuffleManager implements ShuffleManager {
           !DeterministicLevel.INDETERMINATE()
               .equals(dependency.rdd().getOutputDeterministicLevel()));
 
+      // k 这里只创建可传递的描述符；真正的 RegisterShuffle 由第一批 pushData 懒触发。
       return new CelebornShuffleHandle<>(
           appUniqueId,
           lifecycleManager.getHost(),
@@ -352,9 +358,11 @@ public class SparkShuffleManager implements ShuffleManager {
   public <K, V> ShuffleWriter<K, V> getWriter(
       ShuffleHandle handle, long mapId, TaskContext context, ShuffleWriteMetricsReporter metrics) {
     try {
+      // k handle 的类型决定这个 map task 使用 Celeborn writer 还是 Spark 原生 writer。
       if (handle instanceof CelebornShuffleHandle) {
         @SuppressWarnings("unchecked")
         CelebornShuffleHandle<K, V, ?> h = ((CelebornShuffleHandle<K, V, ?>) handle);
+        // k Executor 使用 handle 中的 application 和 LifecycleManager 信息获取或复用 ShuffleClient。
         shuffleClient =
             ShuffleClient.get(
                 h.appUniqueId(),
@@ -367,9 +375,11 @@ public class SparkShuffleManager implements ShuffleManager {
         if (h.stageRerunEnabled()) {
           SparkUtils.addFailureListenerIfBarrierTask(shuffleClient, context, h);
         }
+        // k stage rerun 开启时，把 Spark 逻辑 shuffleId 映射成本次 stage attempt 的 Celeborn shuffleId。
         int shuffleId = SparkUtils.celebornShuffleId(shuffleClient, h, context, true);
         shuffleIdTracker.track(h.shuffleId(), shuffleId);
 
+        // k 先取配置的 HASH/SORT；开启 dynamicWriteMode 时再根据 reduce partition 数覆盖。
         ShuffleMode shuffleMode = celebornConf.shuffleWriterMode();
         if (celebornConf.dynamicWriteModeEnabled()) {
           int partitionCount = h.dependency().partitioner().numPartitions();
@@ -393,6 +403,7 @@ public class SparkShuffleManager implements ShuffleManager {
         }
 
         if (ShuffleMode.SORT.equals(shuffleMode)) {
+          // k 此时只构造 writer，Spark 调用 writer.write(records) 后才开始分区、序列化和 push。
           return new SortBasedShuffleWriter<>(
               shuffleId,
               h.dependency(),
@@ -410,6 +421,7 @@ public class SparkShuffleManager implements ShuffleManager {
             return SparkUtils.createColumnarHashBasedShuffleWriter(
                 shuffleId, h, context, celebornConf, shuffleClient, metrics, pool);
           } else {
+            // k HASH 是默认路径：每个 reduce partition 维护一个发送 buffer。
             return new HashBasedShuffleWriter<>(
                 shuffleId, h, context, celebornConf, shuffleClient, metrics, pool);
           }
@@ -436,6 +448,7 @@ public class SparkShuffleManager implements ShuffleManager {
       int endPartition,
       TaskContext context,
       ShuffleReadMetricsReporter metrics) {
+    // k handle 的类型决定这个 reduce task 使用 Celeborn reader 还是 Spark 原生 reader。
     if (handle instanceof CelebornShuffleHandle) {
       return getCelebornShuffleReader(
           handle, startPartition, endPartition, startMapIndex, endMapIndex, context, metrics);
@@ -523,6 +536,7 @@ public class SparkShuffleManager implements ShuffleManager {
           shuffleIdTracker,
           getCryptoHandler());
     } else {
+      // k 此时只构造 reader，Spark 调用 reader.read() 后才查位置并打开 Worker stream。
       return new CelebornShuffleReader<>(
           h,
           startPartition,

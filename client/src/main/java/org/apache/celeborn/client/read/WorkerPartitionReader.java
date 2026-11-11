@@ -47,6 +47,7 @@ import org.apache.celeborn.common.protocol.PbStreamHandler;
 import org.apache.celeborn.common.protocol.StreamType;
 import org.apache.celeborn.common.util.ExceptionUtils;
 
+// k 一个 WorkerPartitionReader 对应一个 Worker 上已 commit 文件的 chunk stream。
 public class WorkerPartitionReader implements PartitionReader {
   private final Logger logger = LoggerFactory.getLogger(WorkerPartitionReader.class);
   private PartitionLocation location;
@@ -112,6 +113,7 @@ public class WorkerPartitionReader implements PartitionReader {
             synchronized (this) {
               ByteBuf buf = ((NettyManagedBuffer) buffer).getBuf();
               if (!closed) {
+                // k Netty callback 只把返回的 chunk 放入结果队列；消费线程在 next() 中取走。
                 buf.retain();
                 results.add(Pair.of(chunkIndex, buf));
               }
@@ -127,12 +129,14 @@ public class WorkerPartitionReader implements PartitionReader {
           }
         };
     try {
+      // k 根据 PartitionLocation 直连 Worker fetchPort，不经过 Driver 或 Master 转发。
       client = clientFactory.createClient(location.getHost(), location.getFetchPort());
     } catch (InterruptedException ie) {
       logger.error("PartitionReader thread interrupted while creating client.");
       throw ie;
     }
 
+    // k Spark 主链通常复用 CelebornShuffleReader 的批量建流结果；缺失时才单独 OPEN_STREAM。
     if (pbStreamHandler == null) {
       TransportMessage openStreamMsg =
           new TransportMessage(
@@ -145,6 +149,7 @@ public class WorkerPartitionReader implements PartitionReader {
                   .build()
                   .toByteArray());
       ByteBuffer response = client.sendRpcSync(openStreamMsg.toByteBuffer(), fetchTimeoutMs);
+      // k StreamHandler 只有 streamId 和 numChunks，是后续 fetchChunk 的索引句柄，不含数据。
       this.streamHandler = TransportMessage.fromByteBuffer(response).getParsedPayload();
     } else {
       this.streamHandler = pbStreamHandler;
@@ -185,6 +190,7 @@ public class WorkerPartitionReader implements PartitionReader {
   }
 
   @Override
+  // k 维持并发 fetch 窗口，然后阻塞等待某个异步 ChunkFetchSuccess 进入 results。
   public ByteBuf next() throws IOException, InterruptedException {
     checkpoint();
     checkException();
@@ -244,6 +250,7 @@ public class WorkerPartitionReader implements PartitionReader {
           });
     }
     results.clear();
+    // k 通知 Worker 移除该 stream state，并释放客户端尚未消费的 ByteBuf。
     closeStream();
   }
 
@@ -271,6 +278,7 @@ public class WorkerPartitionReader implements PartitionReader {
     return partitionReaderCheckpointMetadata;
   }
 
+  // k 按 fetchMaxReqsInFlight 控制 chunk 请求窗口，避免单个 reader 无界占用网络/内存。
   private void fetchChunks() throws IOException, InterruptedException {
     final int inFlight = inflightRequestCount;
     if (inFlight < fetchMaxReqsInFlight) {
@@ -309,6 +317,7 @@ public class WorkerPartitionReader implements PartitionReader {
               throw e;
             }
           }
+          // k 数据面请求以 streamId + chunkIndex 定位 Worker 已注册文件中的一段数据。
           client.fetchChunk(streamHandler.getStreamId(), chunkIndex, fetchTimeoutMs, callback);
           inflightRequestCount++;
           chunkIndex++;

@@ -53,6 +53,7 @@ import org.apache.celeborn.common.util.ExceptionUtils;
 import org.apache.celeborn.common.util.Utils;
 import org.apache.celeborn.common.write.LocationPushFailedBatches;
 
+// k 对 Spark 暴露连续字节流，内部依次读取一个 reduce partition 的多个 commit location/chunk。
 public abstract class CelebornInputStream extends InputStream {
   private static final Logger logger = LoggerFactory.getLogger(CelebornInputStream.class);
 
@@ -79,6 +80,7 @@ public abstract class CelebornInputStream extends InputStream {
       boolean needDecompress,
       Optional<CryptoHandler> cryptoHandler)
       throws IOException {
+    // k create 只选择并组装 reader；首个 chunk 是否在构造期预取由 clientChunkPrefetchEnabled 决定。
     if (locations == null || locations.isEmpty()) {
       return emptyInputStream;
     } else {
@@ -382,6 +384,7 @@ public abstract class CelebornInputStream extends InputStream {
       this.shuffleClient = shuffleClient;
 
       boolean chunkPrefetchEnabled = conf.clientChunkPrefetchEnabled();
+      // k 先为第一个可读 location 创建 PartitionReader；开启预取时同时拉取首个 chunk。
       moveToNextReader(chunkPrefetchEnabled);
       if (chunkPrefetchEnabled) {
         init();
@@ -419,6 +422,7 @@ public abstract class CelebornInputStream extends InputStream {
           currentLocation, streamHandlers == null ? null : streamHandlers.get(fileIndex));
     }
 
+    // k 一个 committed location/file 读完后关闭旧 stream，再切到下一个 location。
     private void moveToNextReader(boolean fetchChunk) throws IOException {
       if (currentReader != null) {
         currentReader.close();
@@ -647,6 +651,7 @@ public abstract class CelebornInputStream extends InputStream {
         startChunkIndex = chunkRange.getLeft();
         endChunkIndex = chunkRange.getRight();
       }
+      // k 主链的 HDD/SSD/MEMORY 远程读创建 WorkerPartitionReader，直连 Worker fetchPort。
       switch (storageInfo.getType()) {
         case HDD:
         case SSD:
@@ -705,6 +710,7 @@ public abstract class CelebornInputStream extends InputStream {
     }
 
     @Override
+    // k Spark serializer 调 InputStream.read；本地 rawDataBuf 用尽时才进入 fillBuffer。
     public int read() throws IOException {
       if (position < limit) {
         int b = rawDataBuf[position];
@@ -821,6 +827,7 @@ public abstract class CelebornInputStream extends InputStream {
       integrityChecked = true;
     }
 
+    // k 当前 chunk 用尽后向同一 stream 取下一 chunk；文件读完则切换下一个 reader。
     private boolean moveToNextChunk() throws IOException {
       if (currentChunk != null) {
         currentChunk.release();
@@ -857,6 +864,7 @@ public abstract class CelebornInputStream extends InputStream {
       rawDataBuf = new byte[bufferSize];
     }
 
+    // k 把 Worker chunk 中的 Celeborn batch 还原成 Spark serializer 可消费的原始字节。
     private boolean fillBuffer() throws IOException {
       try {
         if (firstChunk && currentReader != null) {
@@ -874,6 +882,7 @@ public abstract class CelebornInputStream extends InputStream {
         LocationPushFailedBatches failedBatch = new LocationPushFailedBatches();
         boolean hasData = false;
         while (currentChunk.isReadable() || moveToNextChunk()) {
+          // k write 端写入的 16-byte header：mapId、attemptId、batchId、payload size。
           currentChunk.readBytes(sizeBuf);
           int mapId = Platform.getInt(sizeBuf, Platform.BYTE_ARRAY_OFFSET);
           int attemptId = Platform.getInt(sizeBuf, Platform.BYTE_ARRAY_OFFSET + 4);
@@ -886,6 +895,7 @@ public abstract class CelebornInputStream extends InputStream {
 
           // Perform dedup/stale-attempt checks before decrypting to avoid paying the
           // crypto cost for batches that will be discarded anyway.
+          // k 只保留 Driver 选定的成功 map attempt，丢弃推测执行产生的旧 attempt。
           if (attemptId != attempts[mapId]) {
             currentChunk.skipBytes(size);
             continue;
@@ -905,6 +915,7 @@ public abstract class CelebornInputStream extends InputStream {
               }
             }
           }
+          // k 跨多个 location 或重试可能遇到重复 batch；以 mapId + batchId 去重。
           Set<Integer> batchSet = batchesRead.computeIfAbsent(mapId, k -> new HashSet<>());
           if (batchSet.contains(batchId)) {
             callback.incDuplicateBytesRead(BATCH_HEADER_SIZE + encryptedSize);
@@ -918,6 +929,7 @@ public abstract class CelebornInputStream extends InputStream {
           }
 
           // Batch is unique and from the correct attempt — now read and optionally decrypt.
+          // k 校验 attempt/去重之后，才读取 payload 并按 write 端的逆序解密、解压。
           if (cryptoHandler.isPresent()) {
             if (size > encryptedBuf.length) {
               encryptedBuf = new byte[size];
@@ -975,6 +987,7 @@ public abstract class CelebornInputStream extends InputStream {
           if (shuffleIntegrityCheckEnabled) {
             aggregatedActualCommitMetadata.addDataWithOffsetAndLength(rawDataBuf, 0, limit);
           }
+          // k rawDataBuf[position, limit) 就是交给 Spark serializer 的明文字节。
           position = 0;
           hasData = true;
           break;

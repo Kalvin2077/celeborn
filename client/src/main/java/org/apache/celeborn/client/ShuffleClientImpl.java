@@ -608,6 +608,7 @@ public class ShuffleClientImpl extends ShuffleClient {
 
   private ConcurrentHashMap<Integer, PartitionLocation> registerShuffle(
       int shuffleId, int numMappers, int numPartitions) throws CelebornIOException {
+    // k Executor 向 Driver 内 LifecycleManager 发 RegisterShuffle，请求全部 reduce partition 的位置。
     return registerShuffleInternal(
         shuffleId,
         numMappers,
@@ -666,6 +667,8 @@ public class ShuffleClientImpl extends ShuffleClient {
   public ConcurrentHashMap<Integer, PartitionLocation> getPartitionLocation(
       int shuffleId, int numMappers, int numPartitions) throws CelebornIOException {
     try {
+      // k 每个 Executor 的 ShuffleClient 按 shuffleId 缓存 partitionId -> PartitionLocation。
+      // k computeIfAbsent 使第一次 push 才触发远程 RegisterShuffle，后续 push 直接复用。
       return reducePartitionMap.computeIfAbsent(
           shuffleId,
           (id) -> {
@@ -1056,6 +1059,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       return 0;
     }
     // register shuffle if not registered
+    // k 取目标位置；这是 write 数据面首次进入 Celeborn 控制面的地方。
     final ConcurrentHashMap<Integer, PartitionLocation> map =
         getPartitionLocation(shuffleId, numMappers, numPartitions);
 
@@ -1090,6 +1094,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       return 0;
     }
 
+    // k PartitionLocation 给出该 reduce partition 当前 epoch 的 primary Worker 及可选 replica。
     final PartitionLocation loc = map.get(partitionId);
     if (loc == null) {
       throw new CelebornIOException(
@@ -1100,6 +1105,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     PushState pushState = getPushState(mapKey);
 
     // increment batchId
+    // k batchId 在同一 map attempt 内递增，reader 使用 mapId + attemptId + batchId 去重。
     final int nextBatchId = pushState.nextBatchId();
 
     if (shuffleCompressionEnabled && !skipCompress) {
@@ -1130,6 +1136,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       length = encrypted.length;
     }
 
+    // k wire batch = 16-byte header(mapId, attemptId, batchId, payload length) + payload。
     final byte[] body = new byte[BATCH_HEADER_SIZE + length];
     Platform.putInt(body, Platform.BYTE_ARRAY_OFFSET, mapId);
     Platform.putInt(body, Platform.BYTE_ARRAY_OFFSET + 4, attemptId);
@@ -1142,11 +1149,13 @@ public class ShuffleClientImpl extends ShuffleClient {
       limitMaxInFlight(mapKey, pushState, loc.hostAndPushPort());
 
       // add inFlight requests
+      // k 发送前登记 in-flight；mapperEnd 会等它们的 callback 全部结束。
       pushState.addBatch(nextBatchId, body.length, loc.hostAndPushPort());
 
       // build PushData request
       NettyManagedBuffer buffer = new NettyManagedBuffer(Unpooled.wrappedBuffer(body));
       final String shuffleKey = Utils.makeShuffleKey(appUniqueId, shuffleId);
+      // k Worker 用 shuffleKey + partitionUniqueId 找到 reserveSlots 阶段建立的 PartitionDataWriter。
       PushData pushData = new PushData(PRIMARY_MODE, shuffleKey, loc.getUniqueId(), buffer);
 
       // build callback
@@ -1378,6 +1387,7 @@ public class ShuffleClientImpl extends ShuffleClient {
             assert dataClientFactory != null;
             TransportClient client =
                 dataClientFactory.createClient(loc.getHost(), loc.getPushPort(), partitionId);
+            // k 异步发往目标 Worker 的 pushPort；完成结果由 wrappedCallback 处理。
             client.pushData(pushData, pushDataTimeout, wrappedCallback);
           } else {
             wrappedCallback.onFailure(
@@ -1424,6 +1434,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       }
     }
 
+    // k 返回的是组包后的字节数，不表示 Worker 已回应或数据已持久化。
     return body.length;
   }
 
@@ -1895,6 +1906,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     PushState pushState = getPushState(mapKey);
 
     try {
+      // k 先等待该 map attempt 的所有 push callback 结束，防止把部分输出标记为完成。
       limitZeroInFlight(mapKey, pushState);
 
       // send CRC32 and num bytes per partition if e2e checks are enabled
@@ -1903,6 +1915,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       long[] bytesPerPartition =
           pushState.getBytesWrittenPerPartition(shuffleIntegrityCheckEnabled, numPartitions);
 
+      // k 所有 push callback 收齐后，再向 Driver LifecycleManager 同步汇报 MapperEnd。
       MapperEndResponse response =
           lifecycleManagerRef.askSync(
               new MapperEnd(
@@ -1952,6 +1965,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     return true;
   }
 
+  // k shuffle read 控制面：Executor 向 Driver LifecycleManager 查询 commit 后的文件组。
   protected Tuple3<ReduceFileGroups, String, Exception> loadFileGroupInternal(
       int shuffleId, boolean isSegmentGranularityVisible) {
     long getReducerFileGroupStartTime = System.nanoTime();
@@ -1963,6 +1977,7 @@ public class ShuffleClientImpl extends ShuffleClient {
       return Tuple3.apply(null, exceptionMsg, exception);
     }
     try {
+      // k 核心查询键是 Celeborn 物理 shuffleId；文件位置仍由 Driver 端 CommitManager 保存。
       GetReducerFileGroup getReducerFileGroup =
           new GetReducerFileGroup(shuffleId, isSegmentGranularityVisible, SerdeVersion.V1);
 
@@ -1988,6 +2003,7 @@ public class ShuffleClientImpl extends ShuffleClient {
               shuffleId,
               TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - getReducerFileGroupStartTime),
               response.fileGroup().size());
+          // k ReduceFileGroups 同时带回 partition locations、每个 map 的有效 attempt 和失败 batch。
           return Tuple3.apply(
               new ReduceFileGroups(
                   response.fileGroup(),
@@ -2054,6 +2070,7 @@ public class ShuffleClientImpl extends ShuffleClient {
   public ReduceFileGroups updateFileGroup(
       int shuffleId, int partitionId, boolean isSegmentGranularityVisible)
       throws CelebornIOException {
+    // k 同一 Executor 对同一 shuffle 只加载一次文件组，后续 reduce partition 复用缓存。
     // Cache hits take no lock. compute() would hold the bin lock across the blocking RPC and
     // convoy every reduce task of the shuffle, so cold loads serialize on a per-shuffle monitor
     // (double-checked) instead: one RPC in flight, and the RPC runs off the map's bin lock.
@@ -2110,6 +2127,7 @@ public class ShuffleClientImpl extends ShuffleClient {
     // When `mapAttempts` is not null, it's guaranteed that the code path comes from
     // CelebornShuffleReader, which means `updateFileGroup` is already called and
     // batch open stream has been tried
+    // k Spark reader 已提前查过文件组并批量 open stream，因此主链里 mapAttempts 不为 null。
     if (mapAttempts == null) {
       ReduceFileGroups fileGroups = updateFileGroup(shuffleId, partitionId, false);
       mapAttempts = fileGroups.mapAttempts;
@@ -2118,12 +2136,14 @@ public class ShuffleClientImpl extends ShuffleClient {
       }
     }
 
+    // k 没有 commit location 就返回 EOF，不会向 Worker 发 fetch 请求。
     if (locations == null || locations.size() == 0) {
       logger.warn("Shuffle data is empty for shuffle {} partition {}.", shuffleId, partitionId);
       return CelebornInputStream.empty();
     } else {
       String shuffleKey = Utils.makeShuffleKey(appUniqueId, shuffleId);
       assert dataClientFactory != null;
+      // k 组装跨多个 PartitionLocation 的输入流；是否立即预取首个 chunk 由 prefetch 配置决定。
       return CelebornInputStream.create(
           conf,
           dataClientFactory,

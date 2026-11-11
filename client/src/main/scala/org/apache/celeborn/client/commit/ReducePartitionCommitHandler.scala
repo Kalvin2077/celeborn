@@ -151,6 +151,7 @@ class ReducePartitionCommitHandler(
   }
 
   private def isStageDataLostInUnknownWorker(shuffleId: Int): Boolean = {
+    // k 可选的提前判丢：未开 push 副本且已分配 Worker 被 Master 判 unknown；该开关默认关闭。
     if (conf.clientShuffleDataLostOnUnknownWorkerEnabled && !conf.clientPushReplicateEnabled) {
       val allocatedWorkers = shuffleAllocatedWorkers.get(shuffleId)
       if (allocatedWorkers != null) {
@@ -169,6 +170,7 @@ class ReducePartitionCommitHandler(
   }
 
   override def setStageEnd(shuffleId: Int): Unit = {
+    // k setStageEnd 是普通 reduce read 的可见性屏障：此时 file groups 已收集完成或已判定丢失。
     getReducerFileGroupRequest synchronized {
       stageEndShuffleSet.add(shuffleId)
     }
@@ -177,6 +179,7 @@ class ReducePartitionCommitHandler(
     // Set empty HashSet during register shuffle.
     // In case of stage with no shuffle data, register shuffle will not be called,
     // so here we still need to check null.
+    // k 唤醒在 final commit 完成前到达、被挂起的 GetReducerFileGroup 请求。
     if (requests != null && !requests.isEmpty) {
       requests.asScala.foreach(replyGetReducerFileGroup(_, shuffleId))
     }
@@ -214,6 +217,7 @@ class ReducePartitionCommitHandler(
 
     try {
       // ask allLocations workers holding partitions to commit files
+      // k StageEnd 之后向所有持有 PartitionLocation 的 Worker 发送 CommitFiles。
       val allocatedWorkers = shuffleAllocatedWorkers.get(shuffleId)
       val (dataLost, commitFailedWorkers) = handleFinalCommitFiles(shuffleId, allocatedWorkers)
       recordWorkerFailure(commitFailedWorkers)
@@ -256,6 +260,7 @@ class ReducePartitionCommitHandler(
 
     // collect result
     if (!dataLost) {
+      // k 只有 commit 结果证明数据未丢失后，才生成供 reducer 查询的 file groups。
       collectResultAndReleaseHdfsReplicas(
         shuffleId,
         shuffleCommittedInfo,
@@ -479,6 +484,7 @@ class ReducePartitionCommitHandler(
       context: RpcCallContext,
       shuffleId: Int,
       serdeVersion: SerdeVersion): Unit = {
+    // k StageEnd 后在这里返回明确的数据丢失，或已 commit 的文件组。
     if (isStageDataLost(shuffleId)) {
       context.reply(
         GetReducerFileGroupResponse(
@@ -519,6 +525,7 @@ class ReducePartitionCommitHandler(
                 case None =>
               }
 
+              // k 响应把 reduce partition 映射到 PartitionLocation，并附有效 map attempts。
               val returnedMsg = GetReducerFileGroupResponse(
                 StatusCode.SUCCESS,
                 reducerFileGroupsMap.getOrDefault(shuffleId, JavaUtils.newConcurrentHashMap()),
@@ -583,6 +590,7 @@ class ReducePartitionCommitHandler(
       shuffleId: Int,
       serdeVersion: SerdeVersion): Unit = {
     // Quick return for ended stage, avoid occupy sync lock.
+    // k 已完成 final commit 就立即回复；否则保留 RPC context，等 setStageEnd 统一回复。
     if (isStageEnd(shuffleId)) {
       replyGetReducerFileGroup(context, shuffleId, serdeVersion)
     } else {

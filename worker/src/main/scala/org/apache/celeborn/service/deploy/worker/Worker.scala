@@ -570,6 +570,7 @@ private[celeborn] class Worker(
   }
 
   private def heartbeatToMaster(): Unit = {
+    // k Worker 心跳同时承担三件事：刷新 Master 侧状态、领取过期 shuffle、领取 Master 预置的上下线事件。
     val activeShuffleKeys = new JHashSet[String]()
     activeShuffleKeys.addAll(partitionLocationInfo.shuffleKeySet)
     activeShuffleKeys.addAll(storageManager.shuffleKeySet())
@@ -606,11 +607,14 @@ private[celeborn] class Worker(
 
   private[worker] def handleHeartbeatResponse(response: HeartbeatFromWorkerResponse): Unit = {
     response.expiredShuffleKeys.asScala.foreach(shuffleKey => workerInfo.releaseSlots(shuffleKey))
+    // k Decommission 不搬文件；Master 判定 shuffle 已注销后由这批 key 驱动本地删除，直到 shuffleKeySet 为空。
     cleanTaskQueue.put(response.expiredShuffleKeys)
 
+    // k Master 不直接 RPC 推送 WorkerEvent；Worker 在心跳响应里取回事件，再进入本地状态机。
     val workerEvent = response.workerEvent
     workerStatusManager.doTransition(workerEvent)
     if (!response.registered) {
+      // k Master 已把本 Worker 从 workersMap 删除时会返回 false；仍存活的 Worker 随即主动重注册上线。
       logError("Worker not registered in master, clean expired shuffle data and register again.")
       registeredInMasterView.set(false)
       try {
@@ -628,12 +632,14 @@ private[celeborn] class Worker(
     super.initialize()
     logInfo(s"Starting Worker $host:$pushPort:$fetchPort:$replicatePort" +
       s" with ${workerInfo.diskInfos} slots.")
+    // k 上线由 Worker 主动 RegisterWorker，Master 不做节点发现；注册失败会终止初始化。
     registerWithMaster()
     scaleMetricCollector.foreach(_.init(new ScaleMetricCollectorContext(
       memoryManager,
       storageManager)))
 
     // start heartbeat
+    // k 对全新 Worker，注册成功已进入 Master 的 workersMap/availableWorkers；首轮心跳继续校正磁盘、负载和状态。
     sendHeartbeatTask = forwardMessageScheduler.scheduleWithFixedDelay(
       new Runnable {
         override def run(): Unit = Utils.tryLogNonFatalError { heartbeatToMaster() }
@@ -679,6 +685,7 @@ private[celeborn] class Worker(
     workerStatusManager.init(this)
 
     controller.init(this)
+    // k 注意 Master 已在注册成功时允许分配；Worker 的 Controller endpoint 到这里才最终就绪。
     rpcEnv.setupEndpoint(RpcNameConstants.WORKER_EP, controller)
     initialized.set(true)
 
@@ -763,6 +770,7 @@ private[celeborn] class Worker(
   }
 
   private def registerWithMaster(): Unit = {
+    // k 注册身份由 host + rpc/push/fetch/replicate 端口组成；Graceful 重启必须复用地址才能接回旧文件读取。
     var registerTimeout = conf.registerWorkerTimeout
     val interval = 2000
     var exception: Throwable = null
@@ -1092,8 +1100,10 @@ private[celeborn] class Worker(
   }
 
   override def exit(exitType: String): String = {
+    // k Worker REST 直接进状态机；Master REST 则会先把节点移出 availableWorkers，再由心跳下发事件。
     exitType.toUpperCase(Locale.ROOT) match {
       case "DECOMMISSION" =>
+        // k 只有这个 Worker REST 入口把 shutdown-hook 上限扩到 decommission force timeout。
         ShutdownHookManager.get().updateTimeout(
           conf.workerDecommissionForceExitTimeout,
           TimeUnit.MILLISECONDS)
@@ -1113,12 +1123,15 @@ private[celeborn] class Worker(
   }
 
   def shutdownGracefully(): Unit = {
+    // k Graceful 面向同地址滚动重启：等活跃 PartitionLocation commit/destroy，不等所有已提交 shuffle 过期。
+    // k 要让重启后旧文件可读，还必须启用 graceful recovery 配置并固定各服务端口。
     // During shutdown, to avoid allocate slots in this worker,
     // add this worker to master's excluded list. When restart, register worker will
     // make master remove this worker from excluded list.
     logInfo("Worker start to shutdown gracefully")
     workerStatusManager.transitionState(State.InGraceFul)
     try {
+      // k Master 将 Worker 加入 shutdownWorkers 并移出 availableWorkers，但暂不从 workersMap 删除。
       masterClient.askSync(
         ReportWorkerUnavailable(List(workerInfo).asJava),
         OneWayMessageResponse.getClass)
@@ -1128,6 +1141,7 @@ private[celeborn] class Worker(
           s"Fail report to master, need wait PartitionLocation auto release: \n$partitionLocationInfo",
           e)
     }
+    // k shutdown=true 后拒绝新 ReserveSlots，已有 push 返回 HARD_SPLIT；CommitFiles 和 fetch 仍可继续。
     shutdown.set(true)
     val interval = conf.workerGracefulShutdownCheckSlotsFinishedInterval
     val timeout = conf.workerGracefulShutdownCheckSlotsFinishedTimeoutMs
@@ -1166,6 +1180,7 @@ private[celeborn] class Worker(
   }
 
   def decommissionWorker(): Unit = {
+    // k Decommission 才是永久缩容：停止新分配/新写入，继续读旧文件，等待本机全部 shuffle 过期。
     logInfo("Worker start to decommission")
     if (workerStatusManager.currentWorkerStatus.getState != State.InDecommission) {
       workerStatusManager.transitionState(State.InDecommission)
@@ -1184,16 +1199,19 @@ private[celeborn] class Worker(
     }
 
     val unreleasedShuffleKeys = storageManager.shuffleKeySet()
+    // k 这里没有数据迁移；超时后仍会退出，非 Graceful close 会清理尚未过期的本地 shuffle。
     if (unreleasedShuffleKeys.isEmpty) {
       logInfo(s"Waiting for all shuffle expired cost ${waitTime}ms.")
     } else {
       logWarning(s"Waiting for all shuffle expired cost ${waitTime}ms, " +
         s"unreleased shuffle: \n${unreleasedShuffleKeys.asScala.mkString("[", ", ", "]")}")
     }
+    // k Decommission 本身不发 WorkerLost；进程退出后由 Master 心跳超时最终移出 workersMap。
     workerStatusManager.transitionState(State.Exit)
   }
 
   def exitImmediately(): Unit = {
+    // k Immediately 不排空 writer/shuffle；它先显式 WorkerLost，再让客户端依靠 revive、副本或 stage rerun 兜底。
     // During shutdown, to avoid allocate slots in this worker,
     // add this worker to master's excluded list. When restart, register worker will
     // make master remove this worker from excluded list.
@@ -1224,6 +1242,7 @@ private[celeborn] class Worker(
       new Runnable {
         override def run(): Unit = {
           logInfo("Shutdown hook called.")
+          // k REST/WorkerEvent 先设置 exitEventType 并触发 System.exit；真正的排空与存储关闭统一在 hook 中完成。
           workerStatusManager.exitEventType match {
             case WorkerEventType.Graceful =>
               shutdownGracefully()

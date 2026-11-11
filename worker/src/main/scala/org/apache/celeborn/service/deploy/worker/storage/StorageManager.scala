@@ -296,6 +296,7 @@ final private[worker] class StorageManager(conf: CelebornConf, workerSource: Abs
     JavaUtils.newConcurrentHashMap[String, ConcurrentHashMap[String, DiskFileInfo]]()
   // ShuffleClient can fetch data from a restarted worker only
   // when the worker's fetching port is stable.
+  // k Graceful 是“同地址重启”：保存 fileName -> FileInfo，重启时用固定 fetchPort 恢复旧读路径。
   val workerGracefulShutdown = conf.workerGracefulShutdown
   if (workerGracefulShutdown) {
     try {
@@ -342,6 +343,7 @@ final private[worker] class StorageManager(conf: CelebornConf, workerSource: Abs
   }
 
   private def reloadAndCleanFileInfos(db: DB): Unit = {
+    // k Worker 在向 Master 注册前恢复 committed FileInfo；文件本身在 Graceful close 中没有被删除。
     if (db != null) {
       val cache = JavaUtils.newConcurrentHashMap[String, UserIdentifier]()
       val itr = db.iterator
@@ -635,6 +637,7 @@ final private[worker] class StorageManager(conf: CelebornConf, workerSource: Abs
   }
 
   def shuffleKeySet(): util.HashSet[String] = {
+    // k Decommission 以这里是否为空作为排空条件：等待所有仍被 Master 登记的 shuffle 过期，而非迁移文件。
     val hashSet = new util.HashSet[String]()
     hashSet.addAll(diskFileInfos.keySet())
     // A shuffle can live only in memory files; decommission and graceful shutdown wait on it too.
@@ -898,6 +901,7 @@ final private[worker] class StorageManager(conf: CelebornConf, workerSource: Abs
     }
     if (db != null) {
       if (exitKind == CelebornExitKind.WORKER_GRACEFUL_SHUTDOWN) {
+        // k Graceful 保存内存层/已提交文件元数据，供同地址 Worker 重启后继续 fetch。
         try {
           saveAllMemoryStorageFileInfosToDB()
           saveAllCommittedFileInfosToDB()
@@ -915,6 +919,7 @@ final private[worker] class StorageManager(conf: CelebornConf, workerSource: Abs
     }
     if (CollectionUtils.isNotEmpty(diskOperators)) {
       if (exitKind != CelebornExitKind.WORKER_GRACEFUL_SHUTDOWN) {
+        // k Decommission/Immediately 都走非 Graceful close；强制超时时剩余 shuffle 会在此被删除。
         cleanupExpiredShuffleKey(shuffleKeySet(), false)
       }
       ThreadUtils.parmap(
