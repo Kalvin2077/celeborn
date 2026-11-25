@@ -104,7 +104,7 @@ abstract class HttpService extends Service with Logging {
       if (tenant.isEmpty) {
         configService.listRawTenantConfigsFromCache().asScala
       } else {
-        List(configService.getRawTenantConfigFromCache(tenant))
+        Option(configService.getRawTenantConfigFromCache(tenant)).toSeq
       }
     tenantConfigs.sortBy(_.getTenantId).map { tenantConfig =>
       s"""
@@ -120,7 +120,7 @@ abstract class HttpService extends Service with Logging {
       if (tenant.isEmpty && name.isEmpty) {
         configService.listRawTenantUserConfigsFromCache().asScala
       } else if (tenant.nonEmpty && name.nonEmpty) {
-        List(configService.getRawTenantUserConfigFromCache(tenant, name))
+        Option(configService.getRawTenantUserConfigFromCache(tenant, name)).toSeq
       } else {
         List()
       }
@@ -188,6 +188,8 @@ abstract class HttpService extends Service with Logging {
   def isDecommissioning: String = throw new UnsupportedOperationException()
 
   def exit(exitType: String): String = throw new UnsupportedOperationException()
+
+  def exit(exitType: String, timeout: String): String = exit(exitType)
 
   /**
    * Whether the service is able to serve, along with the reason when it is not. Intended to back

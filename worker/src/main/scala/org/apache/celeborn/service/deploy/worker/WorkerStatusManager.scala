@@ -77,8 +77,12 @@ private[celeborn] class WorkerStatusManager(conf: CelebornConf) extends Logging 
     storageManager = worker.storageManager
   }
 
-  def doTransition(eventType: WorkerEventType): Unit = this.synchronized {
-    // k 该事件既可由 Worker REST 直接触发，也可由 Master 先记账、再随 Worker 心跳响应下发。
+  def doTransition(eventType: WorkerEventType): Unit = doTransition(eventType, None)
+
+  // k 该事件既可由 Worker REST 直接触发，也可由 Master 先记账、再随 Worker 心跳响应下发。
+  def doTransition(
+      eventType: WorkerEventType,
+      decommissionTimeoutMs: Option[Long]): Unit = this.synchronized {
     if (inExitStatus()) {
       logDebug(s"Worker receive event: $eventType, but in exit State: ${getWorkerState()} ")
     } else {
@@ -92,6 +96,9 @@ private[celeborn] class WorkerStatusManager(conf: CelebornConf) extends Logging 
             if currentState == State.InDecommissionThenIdle || currentState == State.Idle =>
           recommissionWorker()
         case WorkerEventType.Graceful | WorkerEventType.Immediately | WorkerEventType.Decommission =>
+          if (eventType == WorkerEventType.Decommission) {
+            worker.configureDecommissionTimeout(decommissionTimeoutMs)
+          }
           exit(eventType)
         case _ =>
           logDebug(s"Worker receive event: $eventType, and has nothing to do ")
@@ -116,6 +123,10 @@ private[celeborn] class WorkerStatusManager(conf: CelebornConf) extends Logging 
       case _ => // ignore
     }
 
+    startExitThread()
+  }
+
+  protected def startExitThread(): Unit = {
     // Compatible with current exit logic
     // trigger shutdown hook to exit
     // k 这里只选择目标状态；10 秒后 System.exit 才进入 Worker 的 shutdown hook 执行具体下线逻辑。

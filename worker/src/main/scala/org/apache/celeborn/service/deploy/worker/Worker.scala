@@ -629,6 +629,8 @@ private[celeborn] class Worker(
   }
 
   override def initialize(): Unit = {
+    // Exit requests can arrive as soon as the HTTP server or heartbeats start.
+    workerStatusManager.init(this)
     super.initialize()
     logInfo(s"Starting Worker $host:$pushPort:$fetchPort:$replicatePort" +
       s" with ${workerInfo.diskInfos} slots.")
@@ -682,7 +684,6 @@ private[celeborn] class Worker(
     pushDataHandler.init(this)
     replicateHandler.init(this)
     fetchHandler.init(this)
-    workerStatusManager.init(this)
 
     controller.init(this)
     // k 注意 Master 已在注册成功时允许分配；Worker 的 Controller endpoint 到这里才最终就绪。
@@ -1099,15 +1100,49 @@ private[celeborn] class Worker(
     sb.toString()
   }
 
-  override def exit(exitType: String): String = {
-    // k Worker REST 直接进状态机；Master REST 则会先把节点移出 availableWorkers，再由心跳下发事件。
+  @volatile private var effectiveDecommissionTimeoutMs: Long =
+    conf.workerDecommissionForceExitTimeout
+
+  private[worker] def decommissionTimeoutMs: Long = effectiveDecommissionTimeoutMs
+
+  // Called under the status manager's lock, only for an accepted decommission request.
+  private[worker] def configureDecommissionTimeout(timeoutMs: Option[Long]): Unit = {
+    val effectiveTimeoutMs = timeoutMs.getOrElse(conf.workerDecommissionForceExitTimeout)
+    effectiveDecommissionTimeoutMs = effectiveTimeoutMs
+    // k 只有被接受的 Decommission 请求会把 shutdown-hook 上限扩到 decommission force timeout（exit API 可覆盖）。
+    ShutdownHookManager.get().updateTimeout(effectiveTimeoutMs, TimeUnit.MILLISECONDS)
+    logInfo(s"Worker decommission with forceExitTimeout=${effectiveTimeoutMs}ms " +
+      s"(source=${if (timeoutMs.isDefined) "exit API" else "config"}).")
+  }
+
+  // k Worker REST 直接进状态机；Master REST 则会先把节点移出 availableWorkers，再由心跳下发事件。
+  override def exit(exitType: String): String = exit(exitType, null)
+
+  override def exit(exitType: String, timeout: String): String = {
     exitType.toUpperCase(Locale.ROOT) match {
       case "DECOMMISSION" =>
-        // k 只有这个 Worker REST 入口把 shutdown-hook 上限扩到 decommission force timeout。
-        ShutdownHookManager.get().updateTimeout(
-          conf.workerDecommissionForceExitTimeout,
-          TimeUnit.MILLISECONDS)
-        workerStatusManager.doTransition(WorkerEventType.Decommission)
+        val overrideMs: Option[Long] =
+          if (timeout != null && timeout.nonEmpty) {
+            try {
+              val ms = Utils.timeStringAsMs(timeout)
+              if (ms > 0) Some(ms)
+              else {
+                logWarning(s"Invalid exit timeout '$timeout', falling back to config. " +
+                  "Use a positive duration like 600s / 30m / 1h.")
+                None
+              }
+            } catch {
+              case NonFatal(e) =>
+                logWarning(
+                  s"Unparseable exit timeout '$timeout', falling back to config. " +
+                    "Use a positive duration like 600s / 30m / 1h.",
+                  e)
+                None
+            }
+          } else {
+            None
+          }
+        workerStatusManager.doTransition(WorkerEventType.Decommission, overrideMs)
       case "GRACEFUL" =>
         workerStatusManager.doTransition(WorkerEventType.Graceful)
       case "IMMEDIATELY" =>
@@ -1188,7 +1223,7 @@ private[celeborn] class Worker(
     sendWorkerDecommissionToMaster()
     shutdown.set(true)
     val interval = conf.workerDecommissionCheckInterval
-    val timeout = conf.workerDecommissionForceExitTimeout
+    val timeout = decommissionTimeoutMs
     var waitTimes = 0
 
     def waitTime: Long = waitTimes * interval
